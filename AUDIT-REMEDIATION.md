@@ -30,7 +30,7 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 - **Tests:** engine 212, site 416, resilience 56, all green on Windows PowerShell 5.1 and PowerShell 7.
 - **Real run:** 52–63 s, or about 70 s on a day a new 10-Q/10-K triggers the fundamentals download; 79/79 sources answered.
 - **Data:** data file 1.4, backup version 5.
-- **Version control:** none (no git), and **no rollback copy on disk**. The folder snapshots taken after each task (`BluechipBoard_snapshot_*`) were moved to the Recycle Bin on 6 Oct 2026 (see [E](#e-how-to-roll-back)).
+- **Version control:** since 6 Oct 2026 the project is in **git**, with the private GitHub repository `biazini/BluechipBoard` as the source of truth. GitHub Actions runs the three suites on both shells for every push to `main` and every pull request. Personal data, the SEC e-mail (`bluechip-board.config.json`) and every output stay out of git (`.gitignore`). See README → *Working with git*.
 
 ### A. Decisions for the owner (nothing is broken; a choice is needed)
 
@@ -45,7 +45,7 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 | D7 | **Top-holding news aliases** apply only to feeds without a `Dica`, so no story that was already classified changes. | Letting them replace a search feed's `Dica` is more precise, but it changes some assignments and needs the old engine test *"one EM company without keyword is only a weak feed match"* to be updated deliberately. | `Measure-Noticia`, `$AliasesPosicoes` |
 | D8 | **Alphabet gross margin is Unavailable:** Alphabet does not report `GrossProfit`. | Compute it as revenue − `CostOfRevenue` (a derivation, not a tag; not done). | `$MetricasSEC` |
 | D9 | **Country exposure of SXR8 and EUNN** uses the index country, flagged as approximate (your choice of 6 Oct). iShares gives no country breakdown for these two funds. | Keep, or read another source. | `Get-AgregadosETF`, `PaisIndice` |
-| D10 | **Install git** (or keep a copy of the folder before each change). With the snapshots gone, there is no way back to an earlier version except the Recycle Bin. | Recommended before the next change. | — |
+| D10 | ~~Install git~~ **Done on 6 Oct 2026:** private repository `biazini/BluechipBoard`, CI in `.github\workflows\tests.yml`. The history starts with that import; the earlier per-task states exist only in the snapshots in the Recycle Bin (see E). | Optional: protect `main` (pull requests only) once the plan allows it. | — |
 
 ### B. Known limitations and approximations (working as designed, but worth knowing)
 
@@ -78,7 +78,8 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 | R5 | **The site tests use the day's `bluechip-board-data.json`.** Most scenarios fix their own data, but a few read real prices (e.g. 9 rows in the prices table, today's EUR/USD). A real-world change (a source down at the last run) can make such a check fail without a code bug. | Rerun the script, then the tests; if needed, have the scenario fix its own data, as `taxBaseline` does. |
 | R6 | **Duplicated rules** (B11): the alert thresholds and the rate-decision regex exist in two places. | Change both together. |
 | R7 | **`acceptanceDateTime` (B7):** if the SEC fixes it, nothing breaks (the Atom feed is still used). If the Atom endpoint is retired (audit F8), earnings sessions become Unavailable. | Move to another SEC source of acceptance times, such as the filing index pages. |
-| R8 | **Headless Chrome / Edge** is needed by `Test-Site.ps1`. A site run takes about 4 min per shell. | — |
+| R8 | **Headless Chrome / Edge** is needed by `Test-Site.ps1`. A site run takes about 4 min per shell, so a CI run takes about 15 min (Windows minutes count double on private repositories). | Run only the engine suite on pushes if the Actions minutes run short. |
+| R9 | **The sample data for the tests** (`Tests\fixtures\bluechip-board-data.sample.json`, from 6 Oct 2026) is used in a fresh clone and in CI. As it ages, checks that compare with today's date could start to fail there but not on this PC, which has a fresh data file. | Refresh the sample from a recent `bluechip-board-data.json` (it holds public data only; check it has no `"backup"` key and no e-mail). |
 
 ### D. Dated upkeep (calendar)
 
@@ -89,11 +90,13 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 | By **Oct 2027** | Add the 2028 Fed and ECB decisions to `$Calendario`, from the official pages (reminder `Get-LembreteReunioes`, 60 days ahead). Also the companies' earnings dates as they are confirmed. |
 | By **Jan 2028** | The exchange exception lists in `$Bolsas` end in 2027 (reminder at the start of the year). |
 | Every year, before filing IRS | Compare `ANEXO_J` (Quadros 9.2A, 9.4A and 8A; codes G01, G20, E10, E11; the 365-day rule) with the new form and instructions. |
-| Now and then | Empty the Recycle Bin only once you are sure you do not need the old snapshots or `prompts\` (see E). |
+| Now and then | Empty the Recycle Bin only once you are sure you do not need the old snapshots or `prompts\` (see E); the current code is safe in git. |
 
 ### E. How to roll back
 
-There is no rollback copy in the project folder. On 6 Oct 2026 the folder snapshots taken during the feature work were moved to the **Windows Recycle Bin**, together with `prompts\`. While the Recycle Bin is not emptied, they can be restored from there, back to `C:\Users\Admin\Documents\Scripts\`.
+**From 6 Oct 2026 on, use git:** `git log` to find the version, then `git revert <commit>` (or `git switch -c look <commit>` to inspect an old state). Your data is not in git, so a rollback never touches it.
+
+**Before the git import,** there is no rollback copy in the project folder. On 6 Oct 2026 the folder snapshots taken during the feature work were moved to the **Windows Recycle Bin**, together with `prompts\`. While the Recycle Bin is not emptied, they can be restored from there, back to `C:\Users\Admin\Documents\Scripts\`.
 
 | Back to… | Snapshot |
 |---|---|
