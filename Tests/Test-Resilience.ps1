@@ -11,6 +11,8 @@
 #>
 param([string]$Shell = 'powershell.exe')
 $ErrorActionPreference = 'Stop'
+# as cópias do script também leem o e-mail da SEC de BLUECHIP_SEC_EMAIL: os testes decidem quando há e-mail (só neste processo)
+Remove-Item env:BLUECHIP_SEC_EMAIL -ErrorAction SilentlyContinue
 $raiz = Split-Path $PSScriptRoot
 # dados da execução anterior para os testes: os locais, ou a amostra em Tests\fixtures num clone do git (os dados não vão para o git)
 $dadosRef = Join-Path $raiz 'bluechip-board-data.json'; if (-not (Test-Path -LiteralPath $dadosRef)) { $dadosRef = Join-Path $PSScriptRoot 'fixtures\bluechip-board-data.sample.json' }
@@ -145,6 +147,16 @@ try {
     (Get-Item "$dl\bluechip-board-backup.json").LastWriteTime = (Get-Date).AddMinutes(10)   # ficheiro recente, mas com dados antigos
     $o = Invoke-Copia $p3 @{ BB_TEST_BLOCK = '.'; BB_TEST_DOWNLOADS = $dl }
     Check 'older backup (by its saved date) does not replace a newer one' ((Test-Path "$dl\bluechip-board-backup.json") -and ([IO.File]::ReadAllText("$p3\bluechip-board-backup.json") -match '2026-10-01'))
+    # um backup com a data de gravação no futuro (relógio errado) nunca decide: fica nas Transferências, com um aviso
+    Remove-Item "$dl\*" -Force
+    [IO.File]::WriteAllText("$dl\bluechip-board-backup (5).json", '{"app":"Bluechip Board","version":4,"saved":"2099-01-01T10:00:00.000Z","buys":[{"id":"fut","a":"AAPL","d":"2026-08-01","q":9,"p":1}],"lots":[],"sales":[],"deleted":{}}')
+    $o = Invoke-Copia $p3 @{ BB_TEST_BLOCK = '.'; BB_TEST_DOWNLOADS = $dl }
+    Check 'backup in Downloads saved "in the future": left there with a warning, the project backup unchanged' (($o -replace '\s+', ' ') -match 'in the future: it was left there' -and (Test-Path "$dl\bluechip-board-backup (5).json") -and ([IO.File]::ReadAllText("$p3\bluechip-board-backup.json") -match '2026-10-01')) $o
+    Remove-Item "$dl\*" -Force
+    $p3f = Join-Path $base 'backupfuture'; New-Item -ItemType Directory $p3f | Out-Null
+    [IO.File]::WriteAllText("$p3f\bluechip-board-backup.json", '{"app":"Bluechip Board","version":4,"saved":"2099-01-01T10:00:00.000Z","buys":[],"lots":[],"sales":[],"deleted":{}}')
+    $o = Invoke-Copia $p3f @{ BB_TEST_BLOCK = '.'; BB_TEST_DOWNLOADS = $dl }
+    Check 'project backup saved "in the future": a warning says no Downloads backup can be brought in' (($o -replace '\s+', ' ') -match 'in the future: no backup from Downloads can be newer') $o
     $h = [IO.File]::ReadAllText("$p3\bluechip-board.html"); $ar = [IO.File]::ReadAllText((Get-ChildItem "$p3\Archive" | Select-Object -First 1).FullName)
     Check 'backup embedded in the main site only (not in Archive or the data file)' ($h.Contains('{"backup":{"app"') -and $ar.Contains('{"backup":null,') -and -not ([IO.File]::ReadAllText("$p3\bluechip-board-data.json")).Contains('"backup"'))
     # backup v5 com alvos de alocação (dados pessoais): só no site principal, nunca no Archive nem no ficheiro de dados
@@ -209,6 +221,22 @@ try {
     Check 'folder ending in a backslash is quoted safely' ($tk.args -match [regex]::Escape("-Pasta `"$($pasta5)\`"")) $tk.args
     Check 'hidden window, no browser opened, English description' ($tk.args -match '-WindowStyle Hidden' -and $tk.args -match '-NaoAbrir' -and $tk.desc -match '^Bluechip Board: news and prices')
     Check 'reported with the chosen time' ($o -match 'scheduled every day at 07:45')
+    Check 'the SEC e-mail is never stored in the task''s arguments (visible to anyone who lists the tasks); a warning says where the runs read it' ($tk.args -notmatch 'example\.com' -and $tk.args -notmatch 'EmailSEC' -and ($o -replace '\s+', ' ') -match 'does not store the e-mail given with -SecEmail') "$($tk.args) | $o"
+
+    Write-Host 'SEC e-mail from the local configuration (as the scheduled task and the launcher use it)'
+    # bluechip-board.config.json ao lado da cópia do script: a execução sem -SecEmail usa as fontes da SEC (aqui bloqueadas)
+    [IO.File]::WriteAllText((Join-Path $base 'bluechip-board.config.json'), '{ "secEmail": "cfg@example.com" }')
+    try {
+        $p10 = Join-Path $base 'cfgmail'; New-Item -ItemType Directory $p10 | Out-Null
+        $o = Invoke-Copia $p10 @{ BB_TEST_BLOCK = '.'; BB_TEST_DOWNLOADS = $dl9 }
+        $d10 = [IO.File]::ReadAllText("$p10\bluechip-board-data.json") | ConvertFrom-Json
+        Check 'no -SecEmail, e-mail in bluechip-board.config.json: the SEC sources are requested (blocked here: errors, nothing invented)' (@($d10.fontes | Where-Object { $_.nome -like 'SEC: past earnings dates*' -and $_.estado -eq 'error' -and $_.erro -match 'blocked by test' }).Count -eq 3 -and -not ([IO.File]::ReadAllText("$p10\bluechip-board.html")).Contains('cfg@example.com') -and -not ([IO.File]::ReadAllText("$p10\bluechip-board-data.json")).Contains('cfg@example.com')) $o
+        [IO.File]::WriteAllText((Join-Path $base 'bluechip-board.config.json'), '{ "secEmail": "your@email.com" }')
+        $p11 = Join-Path $base 'cfgplaceholder'; New-Item -ItemType Directory $p11 | Out-Null
+        $o = Invoke-Copia $p11 @{ BB_TEST_BLOCK = '.'; BB_TEST_DOWNLOADS = $dl9 }
+        $d11 = [IO.File]::ReadAllText("$p11\bluechip-board-data.json") | ConvertFrom-Json
+        Check 'the example placeholder e-mail: a warning, and the SEC sources are skipped' (($o -replace '\s+', ' ') -match 'is not valid: running without the SEC sources' -and $d11.resultadosSec.AAPL.estado -eq 'skipped') $o
+    } finally { Remove-Item (Join-Path $base 'bluechip-board.config.json') -Force -ErrorAction SilentlyContinue }
     Check 'nothing was registered in Task Scheduler' ($null -eq (Get-ScheduledTask -TaskName $tarefaTeste -ErrorAction SilentlyContinue))
 } finally {
     # proteção: se, apesar de tudo, a tarefa de teste tiver sido registada, é removida

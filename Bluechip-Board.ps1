@@ -75,9 +75,10 @@ $Script:Fontes = New-Object System.Collections.Generic.List[object]
 # ============================================================================
 
 $Ativos = @(
-    @{ Id = 'AAPL';  Nome = 'Apple';    Yahoo = 'AAPL';    Stooq = 'aapl.us'; Moeda = 'USD' },
-    @{ Id = 'NVDA';  Nome = 'NVIDIA';   Yahoo = 'NVDA';    Stooq = 'nvda.us'; Moeda = 'USD' },
-    @{ Id = 'GOOGL'; Nome = 'Alphabet'; Yahoo = 'GOOGL';   Stooq = 'googl.us'; Moeda = 'USD' },
+    # Nasdaq: alternativa ao Yahoo para o preço de 1 ano (validada contra a execução anterior; ver Get-SerieNasdaq)
+    @{ Id = 'AAPL';  Nome = 'Apple';    Yahoo = 'AAPL';    Stooq = 'aapl.us'; Nasdaq = 'AAPL';  Moeda = 'USD' },
+    @{ Id = 'NVDA';  Nome = 'NVIDIA';   Yahoo = 'NVDA';    Stooq = 'nvda.us'; Nasdaq = 'NVDA';  Moeda = 'USD' },
+    @{ Id = 'GOOGL'; Nome = 'Alphabet'; Yahoo = 'GOOGL';   Stooq = 'googl.us'; Nasdaq = 'GOOGL'; Moeda = 'USD' },
     @{ Id = 'SXR8';  Nome = 'iShares Core S&P 500 (SXR8)'; Yahoo = 'SXR8.DE'; Stooq = 'sxr8.de'; Moeda = 'EUR' },
     # Outros ETF da iShares, na Xetra em euros (a mesma bolsa e moeda do SXR8). Metadados e holdings em $ETFs, abaixo.
     @{ Id = 'EUNK';  Nome = 'iShares Core MSCI Europe (EUNK)'; Yahoo = 'EUNK.DE'; Stooq = ''; Moeda = 'EUR' },
@@ -390,6 +391,22 @@ $TierCuidado   = 'motley fool|fool\.com|24/7 wall|247wallst|seeking alpha|seekin
 
 function Write-Passo([string]$Texto) { Write-Host "  • $Texto" -ForegroundColor Cyan }
 
+# E-mail de contacto da SEC quando não vem em -EmailSEC: a variável de ambiente BLUECHIP_SEC_EMAIL ou, se estiver vazia,
+# bluechip-board.config.json na pasta do script ({ "secEmail": "…" }, fora do git). Assim a tarefa agendada e o lançador
+# não o precisam de ter nos argumentos (que ficam visíveis no Agendador de Tarefas e na lista de processos).
+# Devolve o e-mail (ou '') e um aviso quando o ficheiro existe mas não tem um e-mail válido.
+function Get-EmailSecLocal([string]$PastaScript) {
+    $origem = 'BLUECHIP_SEC_EMAIL'; $e = "$env:BLUECHIP_SEC_EMAIL".Trim(); $aviso = ''
+    $cfg = Join-Path $PastaScript 'bluechip-board.config.json'
+    if (-not $e -and (Test-Path -LiteralPath $cfg)) {
+        $origem = 'bluechip-board.config.json'
+        try { $e = "$((Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json).secEmail)".Trim() }
+        catch { $aviso = "bluechip-board.config.json could not be read ($($_.Exception.Message)): running without the SEC sources." }
+    }
+    if ($e -and ($e -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$' -or $e -eq 'your@email.com')) { $aviso = "The SEC e-mail in $origem is not valid: running without the SEC sources."; $e = '' }
+    [pscustomobject]@{ email = $e; aviso = $aviso }
+}
+
 function Get-Url {
     param([string]$Url, [string]$UserAgent = $Script:UA, [int]$Timeout = 25)
     $ultimoErro = $null
@@ -402,9 +419,12 @@ function Get-Url {
             return (ConvertFrom-Bytes $r.RawContentStream.ToArray() "$($r.Headers['Content-Type'])")
         } catch {
             $ultimoErro = $_
+            $codigo = 0; try { $codigo = [int]$_.Exception.Response.StatusCode } catch { }
+            # a permanent answer (bad request, unauthorised, forbidden, not found, gone) does not change a few seconds later:
+            # no second attempt, so a dead source does not slow the run down
+            if ($codigo -in 400, 401, 403, 404, 410) { break }
             if ($tentativa -lt 2) {
                 # rate limit or temporary overload (429/503): wait longer before the second attempt
-                $codigo = 0; try { $codigo = [int]$_.Exception.Response.StatusCode } catch { }
                 Start-Sleep -Seconds $(if ($codigo -eq 429 -or $codigo -eq 503) { 8 } else { 2 })
             }
         }
@@ -667,11 +687,13 @@ function Merge-HistoricoNoticias($Historico, $Noticias, [DateTimeOffset]$Agora, 
 # aceitação que o EDGAR mostra). Sem hora verificada, a hora e a sessão ficam vazias: nunca se inventam.
 # ----------------------------------------------------------------------------
 $Script:FusoNY = $null
+$MaxCabecalhos = 12   # pedidos de cabeçalhos de entregas do EDGAR por empresa e execução (só para 8-K ainda sem hora)
 function Get-FusoNY { if (-not $Script:FusoNY) { $Script:FusoNY = [TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time') }; return $Script:FusoNY }
 # Primeira sessão em $Data ou depois (ou só depois, com -Depois). $Sessoes: datas com fecho no histórico da empresa,
 # por ordem; para além do fim do histórico, os dias úteis sem os feriados indicados.
 function Get-ProximaSessao([string]$Data, [bool]$Depois, [string[]]$Sessoes, [string[]]$Feriados) {
-    if ($Sessoes -and $Sessoes.Count -and [string]::CompareOrdinal($Data, $Sessoes[-1]) -le 0) {
+    # dentro do período do histórico: as datas do histórico (antes do seu início, ou depois do fim, os dias úteis)
+    if ($Sessoes -and $Sessoes.Count -and [string]::CompareOrdinal($Data, $Sessoes[-1]) -le 0 -and [string]::CompareOrdinal($Data, $Sessoes[0]) -ge 0) {
         $i = [Array]::BinarySearch($Sessoes, $Data, [StringComparer]::Ordinal)
         $k = if ($i -ge 0) { $(if ($Depois) { $i + 1 } else { $i }) } else { -bnot $i }
         if ($k -lt $Sessoes.Count) { return $Sessoes[$k] }
@@ -689,13 +711,31 @@ function Get-ProximaSessao([string]$Data, [bool]$Depois, [string[]]$Sessoes, [st
 # das 16:00, a sessão seguinte; antes das 09:30, a própria sessão; durante a sessão, a própria sessão, com nota.
 function Get-SessaoReacao([DateTimeOffset]$Aceite, [string[]]$Sessoes = @(), [string[]]$Feriados = @()) {
     $ny = [TimeZoneInfo]::ConvertTime($Aceite, (Get-FusoNY))
-    $min = $ny.Hour * 60 + $ny.Minute
+    $min = $ny.Hour * 60 + $ny.Minute; $dia = $ny.ToString('yyyy-MM-dd', $Script:Inv)
     $quando = if ($min -ge 960) { 'after' } elseif ($min -lt 570) { 'before' } else { 'during' }
-    $sessao = Get-ProximaSessao $ny.ToString('yyyy-MM-dd', $Script:Inv) ($quando -eq 'after') $Sessoes $Feriados
+    # num dia sem sessão (fim de semana ou feriado, por exemplo a Sexta-feira Santa, em que a SEC recebe entregas) não
+    # há "durante" nem "depois do fecho": a reação é a sessão seguinte
+    if ((Get-ProximaSessao $dia $false $Sessoes $Feriados) -ne $dia) { $quando = 'closed' }
+    $sessao = Get-ProximaSessao $dia ($quando -eq 'after') $Sessoes $Feriados
     [pscustomobject]@{
         horaNY = $ny.ToString('yyyy-MM-dd HH:mm', $Script:Inv); quando = $quando; sessao = $sessao
-        nota = $(if ($quando -eq 'during') { 'Accepted during the session (09:30-16:00 New York): the reaction is counted from that same session.' } else { '' })
+        nota = $(if ($quando -eq 'during') { 'Accepted during the session (09:30-16:00 New York): the reaction is counted from that same session.' } elseif ($quando -eq 'closed') { 'Accepted on a day the exchange was closed: the reaction is counted from the next session.' } else { '' })
     }
+}
+# Hora de aceitação de uma entrega pelo cabeçalho do próprio arquivo do EDGAR (…-index-headers.html, "ACCEPTANCE-DATETIME",
+# em hora de Nova Iorque): a fonte oficial para as entregas que já não estão no feed Atom (só as 40 mais recentes) ou se o
+# feed deixar de existir. Devolve a hora em UTC, ou $null (sem a confirmar, nada é inventado).
+function Get-AceiteCabecalho([string]$Cik, [string]$Acc, [string]$UserAgent) {
+    if ($Acc -notmatch '^\d{10}-\d{2}-\d{6}$') { return $null }
+    $u = "https://www.sec.gov/Archives/edgar/data/$([int64]$Cik)/$($Acc -replace '-', '')/$Acc-index-headers.html"
+    $t = Get-Url $u -UserAgent $UserAgent
+    if ($t -notmatch "<ACCESSION-NUMBER>\s*$([regex]::Escape($Acc))\b") { throw "the EDGAR header is not for $Acc" }
+    $m = [regex]::Match($t, '<ACCEPTANCE-DATETIME>\s*(\d{14})\b')
+    if (-not $m.Success) { return $null }
+    $local = [datetime]::ParseExact($m.Groups[1].Value, 'yyyyMMddHHmmss', $Script:Inv)
+    $fuso = Get-FusoNY
+    if ($fuso.IsInvalidTime($local)) { return $null }
+    return [DateTimeOffset]::new($local, $fuso.GetUtcOffset($local)).ToUniversalTime()
 }
 # $Conhecidas: número de acesso → hora de aceitação já verificada numa execução anterior (as entregas não mudam)
 function Get-ResultadosSEC([hashtable]$Empresa, [string]$UserAgent, [string[]]$Sessoes = @(), [string[]]$Feriados = @(), [hashtable]$Conhecidas = @{}) {
@@ -729,6 +769,15 @@ function Get-ResultadosSEC([hashtable]$Empresa, [string]$UserAgent, [string[]]$S
             }
             if (-not $horas.Count) { $erroHoras = 'no entries in the 8-K feed' }
         } catch { $erroHoras = $_.Exception.Message }
+        # sem hora no feed nem numa execução anterior: o cabeçalho da entrega no arquivo do EDGAR (no máximo $MaxCabecalhos
+        # pedidos por empresa e execução, 400 ms entre eles; as horas encontradas ficam guardadas e não voltam a ser pedidas)
+        $doCab = 0; $erroCab = ''; $pedidos = 0
+        foreach ($o in $oitos) {
+            if ($horas.ContainsKey($o.acc) -or $Conhecidas.ContainsKey($o.acc)) { continue }
+            if ($pedidos -ge $MaxCabecalhos) { break }
+            $pedidos++; Start-Sleep -Milliseconds 400
+            try { $tc = Get-AceiteCabecalho $cik $o.acc $UserAgent; if ($tc) { $horas[$o.acc] = $tc; $doCab++ } } catch { $erroCab = $_.Exception.Message }
+        }
         $semHora = 0
         $lista = @(foreach ($o in $oitos) {
             $t = if ($horas.ContainsKey($o.acc)) { $horas[$o.acc] } elseif ($Conhecidas.ContainsKey($o.acc)) { ConvertTo-Data "$($Conhecidas[$o.acc])" } else { $null }
@@ -737,10 +786,15 @@ function Get-ResultadosSEC([hashtable]$Empresa, [string]$UserAgent, [string[]]$S
                 [pscustomobject]@{ acc = $o.acc; entrega = $o.entrega; aceite = (ConvertTo-IsoUtc $t); horaNY = $s.horaNY; quando = $s.quando; sessao = $s.sessao; nota = $s.nota }
             } else {
                 $semHora++
-                [pscustomobject]@{ acc = $o.acc; entrega = $o.entrega; aceite = $null; horaNY = $null; quando = $null; sessao = $null; nota = 'Acceptance time unavailable (not in the EDGAR 8-K feed): no reaction session.' }
+                [pscustomobject]@{ acc = $o.acc; entrega = $o.entrega; aceite = $null; horaNY = $null; quando = $null; sessao = $null; nota = 'Acceptance time unavailable (not in the EDGAR 8-K feed or the filing header): no reaction session.' }
             }
         })
-        $nota = if ($erroHoras) { "acceptance times: $erroHoras" } elseif ($semHora) { "$semHora older 8-K without an acceptance time" } else { '' }
+        $notas = @()
+        if ($erroHoras) { $notas += "8-K feed: $erroHoras" }
+        if ($doCab) { $notas += "$doCab acceptance time(s) from the EDGAR filing headers" }
+        if ($erroCab) { $notas += "filing headers: $erroCab" }
+        if ($semHora) { $notas += "$semHora 8-K without an acceptance time" }
+        $nota = $notas -join '; '
         Add-Fonte $nome 'sec' $u 'ok' $lista.Count $sw.ElapsedMilliseconds $nota
         return [pscustomobject]@{ id = $Empresa.Id; estado = 'ok'; fonte = 'SEC EDGAR'; obtidoEm = $Script:Agora.ToString('o'); resultados = $lista; ultimoRelatorio = $ultimo; erro = ''; nota = $nota }
     } catch {
@@ -940,7 +994,7 @@ function Get-FundamentaisEmpresa([hashtable]$Empresa, [string]$UserAgent, $Split
     } else { $erro = 'Run with -EmailSEC "your@email.com" to enable it: the SEC requires a contact in each request.' }
     $quando = if ($Anterior) { ConvertTo-Data (ConvertTo-IsoUtc $Anterior.obtidoEm) } else { $null }
     if ($Anterior -and "$($Anterior.estado)" -in 'ok', 'previous run' -and $quando -and ($Script:Agora - $quando).TotalDays -le 120) {
-        return (& $copia $Anterior 'previous run' "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))" $erro '')
+        return (& $copia $Anterior 'previous run' "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))" $erro '')
     }
     return [pscustomobject]@{ id = $Empresa.Id; estado = $(if ($UserAgent) { 'error' } else { 'skipped' }); fonte = ''; obtidoEm = $Script:Agora.ToString('o'); relatorio = $null; tags = $null; faltam = $null; trimestres = @(); ttm = $null; erro = $erro; nota = '' }
 }
@@ -1110,9 +1164,54 @@ function Join-NoticiasDuplicadas($Lista) {
     return $saida.ToArray()
 }
 
+# Pontos isolados impossíveis: um fecho mais de 50 % acima (ou abaixo) dos dois vizinhos, quando os vizinhos concordam
+# entre si (até 10 %). É um erro do fornecedor (um "tick" errado), não um movimento: um desdobramento ou uma queda real
+# mudam o nível de forma duradoura e os vizinhos já não concordam. O último ponto não tem vizinho seguinte e fica sempre.
+function Remove-PicoIsolado($Pontos) {
+    $P = @($Pontos); $fora = 0
+    if ($P.Count -lt 3) { return [pscustomobject]@{ pontos = $P; removidos = 0 } }
+    $out = New-Object System.Collections.Generic.List[object]; $out.Add($P[0])
+    for ($i = 1; $i -lt $P.Count - 1; $i++) {
+        $a = [double]$out[$out.Count - 1][1]; $v = [double]$P[$i][1]; $b = [double]$P[$i + 1][1]
+        if ($a -gt 0 -and $b -gt 0 -and [math]::Abs($b / $a - 1) -le 0.10 -and (($v / $a -gt 1.5 -and $v / $b -gt 1.5) -or ($v / $a -lt 1 / 1.5 -and $v / $b -lt 1 / 1.5))) { $fora++; continue }
+        $out.Add($P[$i])
+    }
+    $out.Add($P[-1])
+    return [pscustomobject]@{ pontos = @(foreach ($x in $out) { , @($x[0], $x[1]) }); removidos = $fora }
+}
+
+# Alternativa ao Yahoo para as ações dos EUA: o histórico diário público da Nasdaq (o mesmo serviço das datas de resultados),
+# 1 ano, em USD. Só é aceite se coincidir com a série da execução anterior nas datas em comum (pelo menos 20, mediana
+# dentro de 1 % e cada data dentro de 3 %): assim um histórico com outro ajuste a desdobramentos, ou de outro título, nunca
+# passa por bom. Sem execução anterior para comparar, não é usado (nada é inventado). Uma sessão de hoje ainda aberta
+# (antes das 16:15 de Nova Iorque) fica de fora: não é um fecho.
+function Get-SerieNasdaq([hashtable]$Ativo, $Referencia) {
+    $u = "https://api.nasdaq.com/api/quote/$([uri]::EscapeDataString($Ativo.Nasdaq))/historical?assetclass=stocks&fromdate=$($Script:Agora.UtcDateTime.AddYears(-1).AddDays(-7).ToString('yyyy-MM-dd', $Script:Inv))&limit=9999&todate=$($Script:Agora.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv))"
+    $j = (Get-Url $u) | ConvertFrom-Json
+    if (-not $j.data) { throw "Nasdaq: $(@($j.status.bCodeMessage | ForEach-Object { $_.errorMessage }) -join ' ')".Trim() }
+    if ("$($j.data.symbol)" -ne $Ativo.Nasdaq) { throw "Nasdaq returned '$($j.data.symbol)' instead of $($Ativo.Nasdaq)" }
+    $porData = @{}; $inv = 0; $ny = [TimeZoneInfo]::ConvertTime($Script:Agora, (Get-FusoNY))
+    foreach ($l in @($j.data.tradesTable.rows)) {
+        $d = [datetime]::MinValue; $c = 0.0
+        if (-not $l -or -not [datetime]::TryParseExact("$($l.date)", 'MM/dd/yyyy', $Script:Inv, [Globalization.DateTimeStyles]::None, [ref]$d) -or
+            -not [double]::TryParse(("$($l.close)" -replace '[$,\s]', ''), [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$c) -or $c -le 0 -or [double]::IsInfinity($c)) { $inv++; continue }
+        $iso = $d.ToString('yyyy-MM-dd', $Script:Inv)
+        if ($iso -gt $ny.ToString('yyyy-MM-dd', $Script:Inv) -or ($iso -eq $ny.ToString('yyyy-MM-dd', $Script:Inv) -and ($ny.Hour * 60 + $ny.Minute) -lt 975)) { continue }
+        $porData[$iso] = [math]::Round($c, 4)
+    }
+    $pts = @(foreach ($k in @($porData.Keys | Sort-Object)) { , @($k, $porData[$k]) })
+    if ($pts.Count -lt 5) { throw 'Nasdaq returned no valid prices' }
+    $ref = @{}; foreach ($p in @($Referencia)) { $q = @($p); if ($q.Count -ge 2) { $ref["$($q[0])"] = [double]$q[1] } }
+    $razoes = @(foreach ($p in $pts) { if ($ref.ContainsKey($p[0]) -and $ref[$p[0]] -gt 0) { $p[1] / $ref[$p[0]] } })
+    if ($razoes.Count -lt 20) { throw "Nasdaq prices could not be checked against the previous run ($($razoes.Count) dates in common, at least 20 needed): not used" }
+    $ord = @($razoes | Sort-Object); $med = $ord[[math]::Floor(($ord.Count - 1) / 2)]
+    if ([math]::Abs($med - 1) -gt 0.01 -or @($razoes | Where-Object { [math]::Abs($_ - 1) -gt 0.03 }).Count) { throw ('Nasdaq prices do not match the previous run''s (median ratio {0}): not used' -f $med.ToString('0.####', $Script:Inv)) }
+    return [pscustomobject]@{ moeda = 'USD'; ultimo = $pts[-1][1]; pontos = $pts; fonte = 'Nasdaq'; splits = @(); parcial = $false; hora = $null; url = $u; invalidos = $inv }
+}
+
 # Série diária de 1 ano: Yahoo Finance (não oficial) com Stooq como alternativa.
 # Com -Desde (data Unix), devolve o histórico diário completo desde essa data, só do Yahoo (as alternativas não têm tanto histórico).
-function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
+function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0, $Referencia = $null) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $nome = if ($Desde) { "Price history: $($Ativo.Nome)" } else { "Prices: $($Ativo.Nome)" }
     try {
@@ -1131,7 +1230,7 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
         # que no verão são 23:00 UTC do dia anterior (em UTC as datas ficavam um dia atrasadas).
         $tzWin = @{ 'America/New_York' = 'Eastern Standard Time'; 'America/Chicago' = 'Central Standard Time'; 'Europe/London' = 'GMT Standard Time'; 'Europe/Berlin' = 'W. Europe Standard Time' }["$($res.meta.exchangeTimezoneName)"]
         $tzBolsa = $null; if ($tzWin) { try { $tzBolsa = [TimeZoneInfo]::FindSystemTimeZoneById($tzWin) } catch { } }
-        $diaBolsa = { param($instante) if ($tzBolsa) { [TimeZoneInfo]::ConvertTime($instante, $tzBolsa).ToString('yyyy-MM-dd') } else { $instante.AddSeconds([int]$res.meta.gmtoffset).UtcDateTime.ToString('yyyy-MM-dd') } }
+        $diaBolsa = { param($instante) if ($tzBolsa) { [TimeZoneInfo]::ConvertTime($instante, $tzBolsa).ToString('yyyy-MM-dd', $Script:Inv) } else { $instante.AddSeconds([int]$res.meta.gmtoffset).UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv) } }
         $porData = @{}; $invalidos = 0
         for ($i = 0; $i -lt $ts.Count; $i++) {
             if ($null -eq $cl[$i]) { continue }
@@ -1140,6 +1239,8 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
             $porData[(& $diaBolsa ([DateTimeOffset]::FromUnixTimeSeconds([int64]$ts[$i])))] = [math]::Round($v, 4)
         }
         $pts = @(foreach ($k in @($porData.Keys | Sort-Object)) { , @($k, $porData[$k]) })
+        # um ponto isolado muito fora dos vizinhos (erro do fornecedor, não um movimento real) sai e é contado
+        $limpo = Remove-PicoIsolado $pts; $pts = $limpo.pontos; $invalidos += $limpo.removidos
         if ($pts.Count -lt 5) { throw 'Empty series' }
         # Stock splits reported by Yahoo (its prices are already adjusted for them): the site uses them to keep
         # purchases registered before a split in the right number of shares
@@ -1162,7 +1263,11 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
             if ($fim -gt 0 -and $hora -ge $ini -and $hora -lt $fim -and $Script:Agora.ToUnixTimeSeconds() -lt $fim) { $parcial = $true }
         } catch { }
         $horaUltimo = $null; if ($res.meta.regularMarketTime) { $horaUltimo = [DateTimeOffset]::FromUnixTimeSeconds([int64]$res.meta.regularMarketTime).ToString('o') }
-        Add-Fonte $nome 'prices' $u 'ok' $pts.Count $sw.ElapsedMilliseconds $(if ($invalidos) { "$invalidos invalid price(s) ignored" } else { '' })
+        # o último ponto não pode ser comparado com o seguinte: um salto enorme fica assinalado na fonte (não é apagado)
+        $notas = @(); if ($invalidos) { $notas += "$invalidos invalid price(s) ignored" }
+        $salto = [double]$pts[-1][1] / [double]$pts[-2][1] - 1
+        if ([math]::Abs($salto) -gt 0.5) { $notas += ('latest price {0:+0;-0}% from the previous close: check it' -f ($salto * 100)) }
+        Add-Fonte $nome 'prices' $u 'ok' $pts.Count $sw.ElapsedMilliseconds ($notas -join '; ')
         return [pscustomobject]@{ moeda = "$($res.meta.currency)"; ultimo = [double]$res.meta.regularMarketPrice; pontos = $pts; fonte = 'Yahoo Finance'; splits = $splits; parcial = $parcial; hora = $horaUltimo }
     } catch {
         $erroYahoo = $_.Exception.Message
@@ -1174,29 +1279,47 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
                 $k = (Get-Url $u3) | ConvertFrom-Json
                 if (@($k.error).Count -and "$($k.error)") { throw "$($k.error)" }
                 $par = @($k.result.PSObject.Properties | Where-Object { $_.Name -ne 'last' })[0]
-                $desde = $Script:Agora.AddYears(-1).ToUnixTimeSeconds()
-                $pts = @(foreach ($v in @($par.Value)) { if ([int64]$v[0] -ge $desde) { , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$v[0]).ToString('yyyy-MM-dd'), [math]::Round([double]::Parse("$($v[4])", $Script:Inv), 4)) } })
+                $desde = $Script:Agora.AddYears(-1).ToUnixTimeSeconds(); $invK = 0
+                # o mesmo controlo do Yahoo: um preço nunca é zero, negativo ou não numérico
+                $pts = @(foreach ($v in @($par.Value)) { $c = 0.0
+                    if ([int64]$v[0] -lt $desde) { continue }
+                    if (-not [double]::TryParse("$($v[4])", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$c) -or [double]::IsNaN($c) -or [double]::IsInfinity($c) -or $c -le 0) { $invK++; continue }
+                    , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$v[0]).ToString('yyyy-MM-dd', $Script:Inv), [math]::Round($c, 4)) })
                 if ($pts.Count -lt 5) { throw 'Kraken returned no data' }
-                Add-Fonte $nome 'prices' $u3 'ok (Kraken fallback)' $pts.Count $sw.ElapsedMilliseconds "Yahoo failed: $erroYahoo"
+                $limpo = Remove-PicoIsolado $pts; $pts = $limpo.pontos; $invK += $limpo.removidos
+                Add-Fonte $nome 'prices' $u3 'ok (Kraken fallback)' $pts.Count $sw.ElapsedMilliseconds ("Yahoo failed: $erroYahoo" + $(if ($invK) { " | $invK invalid price(s) ignored" } else { '' }))
                 return [pscustomobject]@{ moeda = $Ativo.Moeda; ultimo = $pts[-1][1]; pontos = $pts; fonte = 'Kraken'; splits = @(); parcial = $true; hora = $Script:Agora.ToString('o') }
             } catch {
                 Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds "Yahoo: $erroYahoo | Kraken: $($_.Exception.Message)"
                 return $null
             }
         }
-        if (-not $Ativo.Stooq) { Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds $erroYahoo; return $null }
+        # ações dos EUA: o histórico da Nasdaq, validado contra a execução anterior (ver Get-SerieNasdaq)
+        $erros = "Yahoo: $erroYahoo"
+        if ($Ativo.Nasdaq) {
+            try {
+                $n = Get-SerieNasdaq $Ativo $Referencia
+                Add-Fonte $nome 'prices' $n.url 'ok (Nasdaq fallback)' $n.pontos.Count $sw.ElapsedMilliseconds ("Yahoo failed: $erroYahoo" + $(if ($n.invalidos) { " | $($n.invalidos) invalid price(s) ignored" } else { '' }))
+                return $n
+            } catch { $erros += " | Nasdaq: $($_.Exception.Message)" }
+        }
+        if (-not $Ativo.Stooq) { Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds $(if ($Ativo.Nasdaq) { $erros } else { $erroYahoo }); return $null }
         try {
             $u2 = "https://stooq.com/q/d/l/?s=$($Ativo.Stooq)&i=d"
             $csvTexto = Get-Url $u2
             if ($csvTexto -match '^\s*<') { throw 'Stooq returned a web page instead of CSV (it blocks automated requests)' }
             $linhas = @($csvTexto | ConvertFrom-Csv)
             if ($linhas.Count -lt 5 -or -not $linhas[0].Close) { throw 'Stooq returned no data' }
-            $desde = (Get-Date).AddYears(-1).ToString('yyyy-MM-dd')
-            $pts = @(foreach ($l in $linhas) { if ($l.Date -ge $desde) { , @($l.Date, [math]::Round([double]::Parse($l.Close, $Script:Inv), 4)) } })
+            $desde = $Script:Agora.UtcDateTime.AddYears(-1).ToString('yyyy-MM-dd', $Script:Inv)
+            $pts = @(foreach ($l in $linhas) { $c = 0.0
+                if ("$($l.Date)" -notmatch '^\d{4}-\d{2}-\d{2}$' -or $l.Date -lt $desde) { continue }
+                if (-not [double]::TryParse("$($l.Close)", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$c) -or $c -le 0) { continue }
+                , @($l.Date, [math]::Round($c, 4)) })
+            if ($pts.Count -lt 5) { throw 'Stooq returned no valid prices' }
             Add-Fonte $nome 'prices' $u2 'ok (Stooq fallback)' $pts.Count $sw.ElapsedMilliseconds "Yahoo failed: $erroYahoo"
             return [pscustomobject]@{ moeda = $(if ($Ativo.Moeda) { $Ativo.Moeda } else { '' }); ultimo = $pts[-1][1]; pontos = $pts; fonte = 'Stooq'; splits = @(); parcial = $false; hora = $null }
         } catch {
-            Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds "Yahoo: $erroYahoo | Stooq: $($_.Exception.Message)"
+            Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds "$erros | Stooq: $($_.Exception.Message)"
             return $null
         }
     }
@@ -1310,7 +1433,7 @@ function Get-PesosETF([hashtable]$Etf = $null) {
         if ($somaTotal -lt 80 -or $somaTotal -gt 120) { throw ('Holdings weights add up to {0:N1}%, not about 100%: the file format may have changed' -f $somaTotal) }
         # "as of" date of the file (e.g. "01/Oct/2026"), kept also in ISO so the site can tell how old it is
         $dataIso = ''; $dt = [datetime]::MinValue
-        if ($dataRef -and [datetime]::TryParseExact($dataRef, [string[]]@('dd/MMM/yyyy', 'MMM dd, yyyy', 'dd MMM yyyy', 'yyyy-MM-dd', 'MM/dd/yyyy'), [Globalization.CultureInfo]::GetCultureInfo('en-US'), [Globalization.DateTimeStyles]::None, [ref]$dt)) { $dataIso = $dt.ToString('yyyy-MM-dd') }
+        if ($dataRef -and [datetime]::TryParseExact($dataRef, [string[]]@('dd/MMM/yyyy', 'MMM dd, yyyy', 'dd MMM yyyy', 'yyyy-MM-dd', 'MM/dd/yyyy'), [Globalization.CultureInfo]::GetCultureInfo('en-US'), [Globalization.DateTimeStyles]::None, [ref]$dt)) { $dataIso = $dt.ToString('yyyy-MM-dd', $Script:Inv) }
         $r = [pscustomobject]@{ AAPL = [math]::Round((& $peso 'AAPL'), 2); NVDA = [math]::Round((& $peso 'NVDA'), 2); GOOGL = [math]::Round(((& $peso 'GOOGL') + (& $peso 'GOOG')), 2); data = $dataRef; dataIso = $dataIso; aoVivo = $true; fonte = 'iShares (BlackRock)'; top10 = @(); setores = @(); posicoes = 0 }
         # Plausibility: the companies this fund is expected to hold must have a weight between 0 and 25%; in the other
         # funds the three companies may be absent (0%), but never negative or above 25%
@@ -1341,7 +1464,12 @@ function Get-PesosETF([hashtable]$Etf = $null) {
             $r.setores = @($acoes | Group-Object s | ForEach-Object { [pscustomobject]@{ s = $_.Name; w = [math]::Round(($_.Group | Measure-Object w -Sum).Sum, 2) } } | Sort-Object w -Descending)
         }
         $r | Add-Member -NotePropertyName agregados -NotePropertyValue (Get-AgregadosETF $linhas[$inicio] $csv $colPeso $Etf $texto) -Force
-        Add-Fonte $nomeFonte 'ETF' $urlEtf 'ok' $csv.Count $sw.ElapsedMilliseconds ''
+        # mudança de formato do ficheiro: as colunas que faltam dizem-se na fonte (o que depende delas fica "Unavailable")
+        $faltaCol = @('Name', 'Sector', 'Asset Class', 'Market Currency' | Where-Object { [array]::IndexOf($linhas[$inicio], $_) -lt 0 })
+        $notaEtf = @(); if ($faltaCol.Count) { $notaEtf += "file layout changed: no column $($faltaCol -join ', ')" }
+        if (-not $isinFicheiro.Success) { $notaEtf += 'no ISIN found in the file, so the fund could not be confirmed' }
+        foreach ($k in 'paises', 'setores', 'moedas') { if ($null -eq $r.agregados.$k) { $notaEtf += "$(@{ paises = 'country'; setores = 'sector'; moedas = 'currency' }[$k]) breakdown Unavailable" } }
+        Add-Fonte $nomeFonte 'ETF' $urlEtf 'ok' $csv.Count $sw.ElapsedMilliseconds ($notaEtf -join '; ')
         return (Add-InfoETF $r $Etf)
     } catch {
         Add-Fonte $nomeFonte 'ETF' $urlEtf 'error (using reference weights)' 0 $sw.ElapsedMilliseconds $_.Exception.Message
@@ -1364,8 +1492,8 @@ function Get-DatasResultados {
             $d = [datetime]::new([int]$m.Groups[3].Value, [int]$m.Groups[1].Value, [int]$m.Groups[2].Value)
             # Plausibility: the next earnings date is between yesterday and about 6 months ahead
             $distancia = ($d - $Script:Agora.UtcDateTime.Date).TotalDays
-            if ($distancia -lt -2 -or $distancia -gt 200) { throw "Implausible date in the response: $($d.ToString('yyyy-MM-dd'))" }
-            $saida.Add([pscustomobject]@{ e = $id; d = $d.ToString('yyyy-MM-dd'); st = $(if ($txt -match 'estimated') { 'E' } else { 'C' }) })
+            if ($distancia -lt -2 -or $distancia -gt 200) { throw "Implausible date in the response: $($d.ToString('yyyy-MM-dd', $Script:Inv))" }
+            $saida.Add([pscustomobject]@{ e = $id; d = $d.ToString('yyyy-MM-dd', $Script:Inv); st = $(if ($txt -match 'estimated') { 'E' } else { 'C' }) })
             Add-Fonte "Nasdaq: next earnings date ($id)" 'calendar' $u 'ok' 1 $sw.ElapsedMilliseconds ''
         } catch { Add-Fonte "Nasdaq: next earnings date ($id)" 'calendar' $u 'error' 0 $sw.ElapsedMilliseconds $_.Exception.Message }
     }
@@ -1405,7 +1533,7 @@ function Get-Dividendo([hashtable]$Ativo) {
         if (-not $lidos.Count) { throw 'No dividend payments in the provider data for the last 2 years' }
         $ord = @($lidos | Sort-Object t)
         # (pares recriados num ciclo simples: os que saem de um pipeline o Windows PowerShell 5.1 escreve como {value, Count})
-        $pagamentos = @(foreach ($x in $ord) { , @([DateTimeOffset]::FromUnixTimeSeconds($x.t).AddSeconds($gmt).UtcDateTime.ToString('yyyy-MM-dd'), [math]::Round([double]$x.v, 6)) })
+        $pagamentos = @(foreach ($x in $ord) { , @([DateTimeOffset]::FromUnixTimeSeconds($x.t).AddSeconds($gmt).UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv), [math]::Round([double]$x.v, 6)) })
         # pagamentos por ano: pelo intervalo mediano entre pagamentos (mensal, trimestral, semestral ou anual)
         $freq = $null
         if ($ord.Count -ge 2) {
@@ -1454,7 +1582,7 @@ function Get-DadosBitcoin {
     $sw = [Diagnostics.Stopwatch]::StartNew(); $u = 'https://api.alternative.me/fng/?limit=365&format=json'
     try {
         $j = (Get-Url $u) | ConvertFrom-Json
-        $serie = @(foreach ($x in @($j.data)) { , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$x.timestamp).ToString('yyyy-MM-dd'), [int]$x.value) })
+        $serie = @(foreach ($x in @($j.data)) { , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$x.timestamp).ToString('yyyy-MM-dd', $Script:Inv), [int]$x.value) })
         if (-not $serie.Count) { throw 'No values' }
         $hoje = @($j.data)[0]
         if ([int]$hoje.value -lt 0 -or [int]$hoje.value -gt 100) { throw "Index out of range: $($hoje.value)" }   # the index is 0–100
@@ -1468,11 +1596,17 @@ function Get-DadosBitcoin {
     try {
         $p = ((Get-Url $u) | ConvertFrom-Json).bitcoin
         if (-not $p.eur -or [double]$p.eur -le 0) { throw 'No price' }
-        $m = [ordered]@{ eur = [double]$p.eur; usd = [double]$p.usd; var24 = [math]::Round([double]$p.eur_24h_change, 2); capEur = [double]$p.eur_market_cap; volEur = [double]$p.eur_24h_vol; dominio = $null; capTotalEur = $null }
+        # campos em falta ou inválidos ficam $null (o site mostra "—" ou a variação desde as 00:00 UTC): [double]$null seria 0,
+        # e uma variação de 0,00% ou um domínio de 0% pareceriam dados verdadeiros
+        $num = { param($x, [double]$Min = [double]::MinValue) $v = 0.0; if ($null -ne $x -and "$x" -ne '' -and [double]::TryParse("$x", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$v) -and -not [double]::IsNaN($v) -and -not [double]::IsInfinity($v) -and $v -ge $Min) { $v } else { $null } }
+        $v24 = & $num $p.eur_24h_change -100
+        $m = [ordered]@{ eur = [double]$p.eur; usd = (& $num $p.usd 0); var24 = $(if ($null -ne $v24) { [math]::Round($v24, 2) } else { $null }); capEur = (& $num $p.eur_market_cap 0); volEur = (& $num $p.eur_24h_vol 0); dominio = $null; capTotalEur = $null }
         $sw2 = [Diagnostics.Stopwatch]::StartNew(); $u2 = 'https://api.coingecko.com/api/v3/global'
         try {
             $g = ((Get-Url $u2) | ConvertFrom-Json).data
-            $m.dominio = [math]::Round([double]$g.market_cap_percentage.btc, 2); $m.capTotalEur = [double]$g.total_market_cap.eur
+            $dom = & $num $g.market_cap_percentage.btc 0
+            if ($null -eq $dom -or $dom -gt 100) { throw "Unexpected Bitcoin dominance: '$($g.market_cap_percentage.btc)'" }
+            $m.dominio = [math]::Round($dom, 2); $m.capTotalEur = & $num $g.total_market_cap.eur 0
             Add-Fonte 'CoinGecko: Bitcoin dominance' 'bitcoin' $u2 'ok' 1 $sw2.ElapsedMilliseconds ''
         } catch { Add-Fonte 'CoinGecko: Bitcoin dominance' 'bitcoin' $u2 'error' 0 $sw2.ElapsedMilliseconds $_.Exception.Message }
         $r.mercado = $m
@@ -1501,13 +1635,13 @@ function Get-DadosBitcoin {
         $previsto = $Script:Agora.AddMilliseconds(($proximo - $altura) * $msPrevisao)
         $r.rede = [ordered]@{
             altura = $altura; halvingAltura = $proximo; blocosFalta = $proximo - $altura; minBloco = [math]::Round($msBloco / 60000, 1); minBlocoEpoca = [math]::Round($msPrevisao / 60000, 2)
-            halvings = @(foreach ($h in $passados) { , @($h.t.UtcDateTime.ToString('yyyy-MM-dd'), $h.n) })
+            halvings = @(foreach ($h in $passados) { , @($h.t.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv), $h.n) })
             halvingPrevisto = $previsto.ToString('o'); recompensa = 50 / [math]::Pow(2, $epoca); recompensaNova = 50 / [math]::Pow(2, $epoca + 1)
             hashrateEH = $(if ($hash) { [math]::Round([double]$hash / 1e18, 0) } else { $null })
-            ajusteDif = $(if ($ajuste) { [math]::Round([double]$ajuste.difficultyChange, 2) } else { $null })
+            ajusteDif = $(if ($ajuste -and $null -ne $ajuste.difficultyChange -and "$($ajuste.difficultyChange)" -ne '') { [math]::Round([double]$ajuste.difficultyChange, 2) } else { $null })
             ajusteData = $(if ($ajuste -and $ajuste.estimatedRetargetDate) { [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ajuste.estimatedRetargetDate).ToString('o') } else { $null })
         }
-        $r.rede.evento = [ordered]@{ d = $previsto.ToString('yyyy-MM-dd'); e = 'BTC'; imp = 'High'; st = 'E'
+        $r.rede.evento = [ordered]@{ d = $previsto.ToString('yyyy-MM-dd', $Script:Inv); e = 'BTC'; imp = 'High'; st = 'E'
             ev = 'Bitcoin halving (block {0}): the block reward drops from {1} to {2} BTC' -f $proximo.ToString('N0', $Script:Inv), $r.rede.recompensa.ToString('0.#####', $Script:Inv), $r.rede.recompensaNova.ToString('0.#####', $Script:Inv) }
         Add-Fonte 'mempool.space: Bitcoin network and halving' 'bitcoin' 'https://mempool.space/' 'ok' 1 $sw.ElapsedMilliseconds ''
     } catch { Add-Fonte 'mempool.space: Bitcoin network and halving' 'bitcoin' 'https://mempool.space/' 'error' 0 $sw.ElapsedMilliseconds $_.Exception.Message }
@@ -1541,7 +1675,7 @@ function Get-HalvingAproximado {
     $u = $HalvingsConhecidos[-1]; $n = $u.n; $alt = $u.altura; $t = [DateTimeOffset]::Parse($u.t, $Script:Inv)
     do { $n++; $alt += 210000; $t = $t.AddMinutes(210000 * 10) } while ($t -lt $Script:Agora)
     $antes = 50 / [math]::Pow(2, $n - 1); $depois = 50 / [math]::Pow(2, $n)
-    return [pscustomobject]@{ d = $t.UtcDateTime.ToString('yyyy-MM-dd'); e = 'BTC'; imp = 'High'; st = 'E'
+    return [pscustomobject]@{ d = $t.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv); e = 'BTC'; imp = 'High'; st = 'E'
         ev = 'Bitcoin halving (block {0}), approximate date: the block reward drops from {1} to {2} BTC' -f $alt.ToString('N0', $Script:Inv), $antes.ToString('0.#####', $Script:Inv), $depois.ToString('0.#####', $Script:Inv) }
 }
 
@@ -3909,7 +4043,9 @@ if ($AgendarDiariamente) {
     # In a Windows command line, backslashes right before a closing quote must be doubled ("C:\Data\" would swallow the quote)
     $aspas = { param($s) '"' + ($s -replace '(\\+)$', '$1$1') + '"' }
     $argumentos = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $(& $aspas $PSCommandPath) -NaoAbrir -Dias $Dias -Pasta $(& $aspas $Pasta)"
-    if ($EmailSEC) { $argumentos += " -EmailSEC $(& $aspas $EmailSEC)" }
+    # The SEC e-mail is NOT put in the task's arguments (anyone who can list the tasks or the processes would see it):
+    # each scheduled run reads it from bluechip-board.config.json (or BLUECHIP_SEC_EMAIL), like the launcher does.
+    if ($EmailSEC -and $EmailSEC -ne $emailLocal.email) { Write-Warning "The scheduled task does not store the e-mail given with -SecEmail: each run reads it from bluechip-board.config.json next to the script (or BLUECHIP_SEC_EMAIL). Put it there, or the scheduled runs will skip the SEC sources." }
     $acao = New-ScheduledTaskAction -Execute $exe -Argument $argumentos
     $gatilho = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact($Hora, 'HH:mm', $Script:Inv))
     # Windows' defaults would skip the run on battery power (and stop it when unplugged): this PC is a laptop
@@ -3939,6 +4075,14 @@ $brutas = New-Object System.Collections.Generic.List[object]
 foreach ($f in $Feeds) {
     Write-Host "      $($f.Nome)" -ForegroundColor DarkGray
     foreach ($it in (Read-Feed -Feed $f)) { $brutas.Add($it) }
+# Sem -EmailSEC, o e-mail da configuração local (nunca nos argumentos da tarefa agendada nem no git)
+$emailLocal = Get-EmailSecLocal $PSScriptRoot
+if (-not $EmailSEC) {
+    $EmailSEC = $emailLocal.email
+    if ($emailLocal.aviso) { Write-Warning $emailLocal.aviso }
+    elseif (-not $EmailSEC -and -not $AgendarDiariamente) { Write-Host '  ! No SEC e-mail (-SecEmail, bluechip-board.config.json or BLUECHIP_SEC_EMAIL): the SEC sources are skipped.' -ForegroundColor DarkYellow }
+}
+
 }
 if ($EmailSEC) {
     Write-Passo 'Reading SEC filings'
@@ -4035,7 +4179,8 @@ $ativosDados = @(foreach ($a in $Ativos) {
     New-DadosSerie $a $s $a.Moeda
 })
 $mercadoDados = @(foreach ($a in $Mercado) {
-    $s = Get-Serie $a
+    $ref = if ($anterior) { @($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0] } else { $null }
+    $s = Get-Serie $a -Referencia $(if ($ref) { @(Get-PontosGuardados $ref.pontos) } else { $null })
     if (-not $s -and $anterior) { $s = Get-SerieAnterior (@($anterior.mercado | Where-Object { $_.id -eq $a.Id })[0].pontos) "Prices: $($a.Nome)" (@($anterior.mercado | Where-Object { $_.id -eq $a.Id })[0]) }
     New-DadosSerie $a $s ''
 })
@@ -4062,14 +4207,14 @@ foreach ($id in @($dividendos.Keys)) {
     $pag = @(Get-PontosGuardados $v.pagamentos)
     $dataPreco = if ($v.precoData -is [datetime]) { ([DateTimeOffset]$v.precoData).ToString('o') } else { "$($v.precoData)" }
     $dividendos[$id] = [pscustomobject]@{
-        id = $id; simbolo = "$($v.simbolo)"; moeda = 'USD'; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))"; obtidoEm = $quando.ToString('o')
+        id = $id; simbolo = "$($v.simbolo)"; moeda = 'USD'; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))"; obtidoEm = $quando.ToString('o')
         anualPorAcao = $anualV; ttmPorAcao = $(if ($null -ne $v.ttmPorAcao) { [double]$v.ttmPorAcao } else { $null }); frequencia = $v.frequencia
         rendimentoPct = $(if ($null -ne $v.rendimentoPct) { [double]$v.rendimentoPct } else { $null })
         ultimo = $(if ($pag.Count) { @($pag[-1][0], $pag[-1][1]) } else { $null }); pagamentos = $pag
         preco = $v.preco; precoData = $dataPreco; nota = "$($v.nota)"; erro = $dividendos[$id].erro
     }
     $f = @($Script:Fontes | Where-Object { $_.nome -like "Dividends: *" -and $_.url -match [regex]::Escape("/chart/$($v.simbolo)?") }) | Select-Object -Last 1
-    if ($f) { $f.estado = "error (showing previous run's data, retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))" }
+    if ($f) { $f.estado = "error (showing previous run's data, retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))" }
 }
 Write-Passo 'Getting Bitcoin indicators (sentiment, dominance, network)'
 $bitcoin = Get-DadosBitcoin
@@ -4136,7 +4281,7 @@ foreach ($s in $SecEmpresas) {
         $lista = @(foreach ($r in @($v.resultados)) { if ($r -and $r.acc) {
             [pscustomobject]@{ acc = "$($r.acc)"; entrega = "$($r.entrega)"; aceite = (ConvertTo-IsoUtc $r.aceite); horaNY = $(if ($r.horaNY) { "$($r.horaNY)" } else { $null }); quando = $(if ($r.quando) { "$($r.quando)" } else { $null }); sessao = $(if ($r.sessao) { "$($r.sessao)" } else { $null }); nota = "$($r.nota)" } } })
         $ult = if ($v.ultimoRelatorio) { [pscustomobject]@{ form = "$($v.ultimoRelatorio.form)"; data = "$($v.ultimoRelatorio.data)"; periodo = "$($v.ultimoRelatorio.periodo)"; acc = "$($v.ultimoRelatorio.acc)" } } else { $null }
-        $resultadosSec[$s.Id] = [pscustomobject]@{ id = $s.Id; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))"; obtidoEm = $quando.ToString('o'); resultados = $lista; ultimoRelatorio = $ult; erro = $motivo; nota = '' }
+        $resultadosSec[$s.Id] = [pscustomobject]@{ id = $s.Id; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))"; obtidoEm = $quando.ToString('o'); resultados = $lista; ultimoRelatorio = $ult; erro = $motivo; nota = '' }
     } else {
         $resultadosSec[$s.Id] = [pscustomobject]@{ id = $s.Id; estado = $(if ($x) { 'error' } else { 'skipped' }); fonte = ''; obtidoEm = $Script:Agora.ToString('o'); resultados = @(); ultimoRelatorio = $null; erro = $motivo; nota = '' }
     }
@@ -4181,7 +4326,9 @@ if ($transferencias -and (Test-Path -LiteralPath $transferencias)) {
         foreach ($c in $candidatos) {
             $b = Read-Backup $c.FullName
             if (-not $b) { Write-Warning "$($c.Name) in Downloads is not a valid Bluechip Board backup: it was left there and not used."; continue }
-            if ((Get-InstanteBackup $b) -le $tAtual) { continue }   # older than (or same as) the project file: left untouched
+            $tC = Get-InstanteBackup $b
+            if ($tC -gt $futuro) { Write-Warning "$($c.Name) in Downloads says it was saved on $($tC.UtcDateTime.ToString('yyyy-MM-dd HH:mm', $Script:Inv)) UTC, in the future: it was left there and not used. Check the PC's clock."; continue }
+            if ($tC -le $tAtual) { continue }   # older than (or same as) the project file: left untouched
             if (Test-Path -LiteralPath $bkPath) { Copy-Item -LiteralPath $bkPath -Destination (Join-Path $Pasta 'bluechip-board-backup.previous.json') -Force }
             Move-Item -LiteralPath $c.FullName -Destination $bkPath -Force
             Write-Passo "Backup moved from Downloads to $bkNome (the previous file was kept as bluechip-board-backup.previous.json)"
@@ -4209,10 +4356,12 @@ foreach ($s in $SeriesMacro) {
             $x = 0.0
             if ($q -and $q.Count -ge 2 -and "$($q[0])" -match '^\d{4}-\d{2}-\d{2}$' -and [double]::TryParse("$($q[1])", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$x)) { , @("$($q[0])", $x) }
         })
-        if ($pts.Count) { $m = [pscustomobject]@{ id = $s.Id; nome = $s.Nome; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))"; obtidoEm = $quando.ToString('o'); freq = "$($v.freq)"; pontos = $pts; erro = $m.erro } }
+        if ($pts.Count) { $m = [pscustomobject]@{ id = $s.Id; nome = $s.Nome; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))"; obtidoEm = $quando.ToString('o'); freq = "$($v.freq)"; pontos = $pts; erro = $m.erro } }
     }
     $macro[$s.Id] = $m
 }
+        # a backup "saved" in the future (a wrong clock) would win every comparison forever: it is never used to decide
+        $futuro = $Script:Agora.AddDays(1)
 
 # Manutenção: dados do script que envelhecem e devem ser revistos à mão (aparecem na consola e em Sources & method)
 $manutencao = New-Object System.Collections.Generic.List[string]
@@ -4228,6 +4377,9 @@ foreach ($e in @($ETFs | Where-Object { $_.Id -ne 'SXR8' -and $_.Referencia })) 
     }
 }
 if (-not @($Calendario | Where-Object { $x = [datetime]::MinValue; [datetime]::TryParseExact("$($_.d)", 'yyyy-MM-dd', $Script:Inv, [Globalization.DateTimeStyles]::None, [ref]$x) -and $x -gt $Script:Agora.UtcDateTime.AddDays(30) }).Count) {
+    elseif (($tBk = Get-InstanteBackup $backup) -gt $Script:Agora.AddDays(1)) {
+        Write-Warning "$bkNome says it was saved on $($tBk.UtcDateTime.ToString('yyyy-MM-dd HH:mm', $Script:Inv)) UTC, in the future: no backup from Downloads can be newer, so none will be brought in. Check the PC's clock, then save the backup again from the website."
+    }
     $manutencao.Add('The manual calendar ($Calendario) has no events more than 30 days ahead: add the next Fed meetings and earnings dates.')
 }
 foreach ($b in $Bolsas) {
@@ -4295,7 +4447,7 @@ function Write-Atomico([string]$Caminho, [string]$Texto) {
 # Cópia datada de cada execução, guardada à parte na pasta Archive (fica só o site mais recente na pasta principal)
 $arquivo = Join-Path $Pasta 'Archive'
 New-Item -ItemType Directory -Force -Path $arquivo | Out-Null
-$ficheiro = Join-Path $arquivo ("bluechip-board-{0}.html" -f (Get-Date).ToString('yyyy-MM-dd_HHmm'))
+$ficheiro = Join-Path $arquivo ("bluechip-board-{0}.html" -f (Get-Date).ToString('yyyy-MM-dd_HHmm', $Script:Inv))
 $ultimo = Join-Path $Pasta 'bluechip-board.html'
 Write-Atomico $ficheiro $htmlArquivo
 Write-Atomico $ultimo $htmlSite

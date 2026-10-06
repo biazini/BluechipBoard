@@ -336,7 +336,13 @@ $Script:SecJ = SecJson '0000320193' @(
 $Script:SecA = SecAtom @(@('0000320193-26-000018', '2026-07-30T16:30:28-04:00', 'items 2.02 and 9.01'), @('0000320193-26-000011', '2026-04-30T16:30:41-04:00', 'items 2.02 and 9.01'), @('0001140361-26-015711', '2026-04-20T17:29:51-04:00', 'item 5.02'))
 $Script:SecFalha = ''; $Script:SecPedidos = New-Object System.Collections.Generic.List[string]
 $guardaUrl2 = ${function:Get-Url}
-function Get-Url { param([string]$Url, [string]$UserAgent, [int]$Timeout) $Script:SecPedidos.Add("$UserAgent|$Url"); if ($Url -match '^https://data\.sec\.gov/submissions/CIK\d{10}\.json$') { if ($Script:SecFalha -eq 'json') { throw '503 Service Unavailable' }; return $Script:SecJ }; if ($Url -match 'browse-edgar.*type=8-K.*output=atom') { if ($Script:SecFalha -eq 'atom') { throw 'timeout' }; return $Script:SecA }; throw "unexpected $Url" }
+# cabeçalhos das entregas no arquivo do EDGAR (…-index-headers.html): número de acesso → ACCEPTANCE-DATETIME (hora de Nova
+# Iorque, aaaammddhhmmss) ou o texto inteiro da resposta; sem entrada, a SEC responde 404
+$Script:SecCab = @{}
+function SecCabecalho([string]$Acc, [string]$Dt) { "<HTML><HEAD><TITLE>SEC EDGAR Submission $Acc</TITLE></HEAD><BODY><PRE>`n&lt;SEC-HEADER&gt;$Acc.hdr.sgml : 20260730`n<ACCEPTANCE-DATETIME>$Dt`n<ACCESSION-NUMBER>$Acc`n<TYPE>8-K`n<ITEMS>2.02</PRE></BODY></HTML>" }
+function Get-Url { param([string]$Url, [string]$UserAgent, [int]$Timeout) $Script:SecPedidos.Add("$UserAgent|$Url"); if ($Url -match '^https://data\.sec\.gov/submissions/CIK\d{10}\.json$') { if ($Script:SecFalha -eq 'json') { throw '503 Service Unavailable' }; return $Script:SecJ }; if ($Url -match 'browse-edgar.*type=8-K.*output=atom') { if ($Script:SecFalha -eq 'atom') { throw 'timeout' }; return $Script:SecA }
+    if ($Url -match '^https://www\.sec\.gov/Archives/edgar/data/\d+/\d{18}/(\d{10}-\d{2}-\d{6})-index-headers\.html$') { $acc = $Matches[1]; $c = $Script:SecCab[$acc]; if (-not $c) { throw '404 Not Found' }; if ($c -match '^\d{14}$') { return (SecCabecalho $acc $c) }; return $c }
+    throw "unexpected $Url" }
 $apple = @{ Id = 'AAPL'; Cik = '0000320193' }
 $x = Get-ResultadosSEC $apple 'BluechipBoard/1.0 test@example.com' $sess $fer
 $ra = { param($a) @($x.resultados | Where-Object { $_.acc -eq $a })[0] }
@@ -344,9 +350,9 @@ Check 'valid: the 8-K with item 2.02 of the last 5 years (not item 5.02, not 201
 $a = & $ra '0000320193-26-000018'
 Check 'acceptance time from the EDGAR 8-K feed (16:30 New York), not the JSON field (00:30Z)' ($a.aceite -eq '2026-07-30T20:30:28Z' -and $a.horaNY -eq '2026-07-30 16:30' -and $a.quando -eq 'after' -and $a.sessao -eq '2026-07-31' -and $a.entrega -eq '2026-07-30') ($a | ConvertTo-Json -Compress)
 $a = & $ra '0000320193-22-000070'
-Check 'an 8-K missing from the feed: no time and no session (Unavailable), nothing invented' ($null -eq $a.aceite -and $null -eq $a.sessao -and $a.nota -match 'unavailable' -and $x.nota -match '1 older 8-K') ($a | ConvertTo-Json -Compress)
+Check 'an 8-K missing from the feed and without a filing header: no time and no session (Unavailable), nothing invented' ($null -eq $a.aceite -and $null -eq $a.sessao -and $a.nota -match 'unavailable' -and $x.nota -match '1 8-K without an acceptance time' -and $x.nota -match 'filing headers: 404') ($a | ConvertTo-Json -Compress)
 Check 'latest 10-Q/10-K kept (form, filing date, period)' ($x.ultimoRelatorio.form -eq '10-Q' -and $x.ultimoRelatorio.data -eq '2026-07-31' -and $x.ultimoRelatorio.periodo -eq '2026-06-27') ($x.ultimoRelatorio | ConvertTo-Json -Compress)
-Check 'two requests, both with the SEC User-Agent' ($Script:SecPedidos.Count -eq 2 -and @($Script:SecPedidos | Where-Object { $_ -notlike 'BluechipBoard/1.0 test@example.com|https://*' }).Count -eq 0) ($Script:SecPedidos -join ' ; ')
+Check 'three requests (filings list, 8-K feed, the filing header of the one 8-K missing from the feed), all with the SEC User-Agent' ($Script:SecPedidos.Count -eq 3 -and $Script:SecPedidos[2] -like '*/Archives/edgar/data/320193/000032019322000070/0000320193-22-000070-index-headers.html' -and @($Script:SecPedidos | Where-Object { $_ -notlike 'BluechipBoard/1.0 test@example.com|https://*' }).Count -eq 0) ($Script:SecPedidos -join ' ; ')
 Check 'source recorded as ok' ($Script:Fontes[-1].nome -eq 'SEC: past earnings dates (AAPL)' -and $Script:Fontes[-1].estado -eq 'ok' -and $Script:Fontes[-1].itens -eq 3)
 Check 'results serialise as plain JSON (dates as text)' (($x | ConvertTo-Json -Depth 5 -Compress) -match '"aceite":"2026-07-30T20:30:28Z","horaNY":"2026-07-30 16:30","quando":"after","sessao":"2026-07-31"') ($x | ConvertTo-Json -Depth 5 -Compress)
 $Script:SecJ = SecJson '0001045810' @(, @('8-K', '0001045810-26-000073', '2026-08-26', '2026-08-26', '2.02,9.01', '2026-08-26T20:21:19.000Z'))
@@ -361,6 +367,34 @@ Check 'SEC down: error recorded, nothing invented, no exception' ($x.estado -eq 
 $Script:SecFalha = 'atom'; $x = Get-ResultadosSEC $apple 'ua' $sess $fer @{ '0000320193-26-000011' = '2026-04-30T20:30:41Z' }
 Check 'acceptance feed down: dates kept, times from the previous run reused, the others Unavailable' ($x.estado -eq 'ok' -and $null -eq (& $ra '0000320193-26-000018').sessao -and (& $ra '0000320193-26-000011').sessao -eq '2026-05-01' -and $x.nota -match 'timeout') ($x | ConvertTo-Json -Depth 5 -Compress)
 $Script:SecFalha = ''
+# hora de aceitação pelo cabeçalho da entrega no arquivo do EDGAR (remediação de 7 out 2026: o feed Atom só tem as 40 mais recentes)
+$Script:SecJ = SecJson '0000320193' @(
+    @('8-K', '0000320193-26-000018', '2026-07-30', '2026-07-30', '2.02,9.01', 'x'),
+    @('8-K', '0000320193-22-000070', '2022-07-28', '2022-07-28', '2.02,9.01', 'x'),
+    @('8-K', '0000320193-23-000005', '2023-02-02', '2023-02-02', '2.02,9.01', 'x'),
+    @('8-K', '0000320193-24-000007', '2024-01-30', '2024-01-30', '2.02,9.01', 'x'),
+    @('8-K', '0000320193-21-000105', '2021-10-28', '2021-10-28', '2.02,9.01', 'x'))
+$Script:SecCab = @{ '0000320193-22-000070' = '20220728163012'; '0000320193-23-000005' = '20230202163107' }
+$Script:SecCab['0000320193-24-000007'] = (SecCabecalho '0000320193-24-000999' '20240130163000')   # cabeçalho de outra entrega
+$Script:SecPedidos.Clear()
+$x = Get-ResultadosSEC $apple 'ua' $sess $fer @{ '0000320193-21-000105' = '2021-10-28T20:30:00Z' }
+$a = & $ra '0000320193-22-000070'
+Check 'filing header: summer time (EDT) 16:30:12 New York = 20:30:12 UTC, reaction the next session' ($a.aceite -eq '2022-07-28T20:30:12Z' -and $a.horaNY -eq '2022-07-28 16:30' -and $a.quando -eq 'after' -and $a.sessao -eq '2022-07-29') ($a | ConvertTo-Json -Compress)
+$a = & $ra '0000320193-23-000005'
+Check 'filing header: winter time (EST) 16:31:07 New York = 21:31:07 UTC' ($a.aceite -eq '2023-02-02T21:31:07Z' -and $a.quando -eq 'after' -and $a.sessao -eq '2023-02-03') ($a | ConvertTo-Json -Compress)
+$a = & $ra '0000320193-24-000007'
+Check 'a filing header of another accession number is rejected: no time, nothing invented' ($null -eq $a.aceite -and $null -eq $a.sessao -and $x.nota -match 'not for 0000320193-24-000007') ($x.nota)
+Check 'times already known (previous run) and from the 8-K feed are not requested again; the note counts the headers used' (@($Script:SecPedidos | Where-Object { $_ -match '0000320193-21-000105|0000320193-26-000018' -and $_ -match 'index-headers' }).Count -eq 0 -and (& $ra '0000320193-21-000105').aceite -eq '2021-10-28T20:30:00Z' -and $x.nota -match '2 acceptance time\(s\) from the EDGAR filing headers') ($Script:SecPedidos -join ' ; ')
+$guardaMax = $MaxCabecalhos; $MaxCabecalhos = 1; $Script:SecPedidos.Clear(); $Script:SecCab = @{}
+$x = Get-ResultadosSEC $apple 'ua' $sess $fer
+$MaxCabecalhos = $guardaMax
+Check 'filing headers: at most $MaxCabecalhos requests per company and run (the rest stay Unavailable until the next run)' (@($Script:SecPedidos | Where-Object { $_ -match 'index-headers' }).Count -eq 1 -and @($x.resultados | Where-Object { -not $_.aceite }).Count -eq 4) ($Script:SecPedidos -join ' ; ')
+Check 'filing header with the acceptance time in a winter-time gap or malformed: no time' ($null -eq (& { $Script:SecCab = @{ '0000320193-26-000018' = (SecCabecalho '0000320193-26-000018' '2026073016') }; Get-AceiteCabecalho '0000320193' '0000320193-26-000018' 'ua' }) -and $null -eq (& { $Script:SecCab = @{ '0000320193-26-000018' = '20260308023000' }; Get-AceiteCabecalho '0000320193' '0000320193-26-000018' 'ua' }))
+$Script:SecCab = @{}
+$r = Get-SessaoReacao ([DateTimeOffset]::Parse('2026-04-03T11:00:00-04:00', $Script:Inv)) $sess $fer
+Check 'released on a day the exchange is closed (Good Friday, 11:00): "closed", reaction the next session, with a note' ($r.quando -eq 'closed' -and $r.sessao -eq '2026-04-06' -and $r.nota -match 'closed') ($r | ConvertTo-Json -Compress)
+$r = Get-SessaoReacao ([DateTimeOffset]::Parse('2026-08-01T10:00:00-04:00', $Script:Inv)) $sess $fer
+Check 'released on a Saturday: "closed", reaction on Monday' ($r.quando -eq 'closed' -and $r.sessao -eq '2026-08-03') ($r | ConvertTo-Json -Compress)
 ${function:Get-Url} = $guardaUrl2
 
 Write-Host 'Fundamentals from SEC XBRL companyfacts (canned responses)'
@@ -638,6 +672,115 @@ try {
     [IO.File]::WriteAllText($f, '{"app":"Other"}')
     Check 'file from another app is rejected' ($null -eq (Read-Backup $f))
 } finally { Remove-Item $tmp -Recurse -Force }
+
+Write-Host 'Remediation of 7 Oct 2026'
+# --- datas independentes da cultura do Windows (um calendário não gregoriano, como o tailandês, dava "2569-…") ---
+$culturaAntes = [Threading.Thread]::CurrentThread.CurrentCulture
+try {
+    [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::GetCultureInfo('th-TH')
+    ${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) return $Script:Resposta }
+    $Script:Resposta = Yahoo 'AAPL' 'USD' @(1, 2, 3, 4, 5, 6)
+    $s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+    $Script:Resposta = YahooDiv 'AAPL' 'USD' '333.69' @(@(147, '0.27'), @(55, '0.27'))
+    $d = Get-Dividendo $aapl
+    Check 'Thai (Buddhist) calendar in Windows: price and dividend dates stay Gregorian ISO (2025-…, not 2568-…)' ($s.pontos[0][0] -eq '2025-09-30' -and "$($d.pagamentos[0][0])" -like '2026-*') "$($s.pontos[0][0]) / $($d.pagamentos[0][0])"
+} finally { [Threading.Thread]::CurrentThread.CurrentCulture = $culturaAntes }
+$partesPs = $texto.Substring(0, $texto.IndexOf('function Get-Plantilla {')) + $texto.Substring($texto.IndexOf('# 4. EXECU'))
+Check 'static: every date formatted by the script names its culture (no ToString(''yyyy-MM-dd'') on its own)' (-not ([regex]::IsMatch($partesPs, "ToString\('yyyy-MM-dd[^']*'\)")))
+
+# --- pontos de preço isolados e impossíveis (um "tick" errado do fornecedor) ---
+$Script:Resposta = Yahoo 'AAPL' 'USD' @(100, 101, 1010, 102, 103, 104)
+$s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+Check 'an isolated price 10x its two neighbours is dropped and counted' ($s -and $s.pontos.Count -eq 5 -and @($s.pontos | Where-Object { $_[1] -eq 1010 }).Count -eq 0 -and $Script:Fontes[-1].erro -match '1 invalid') "$($s.pontos.Count) / $($Script:Fontes[-1].erro)"
+$Script:Resposta = Yahoo 'AAPL' 'USD' @(100, 101, 10.1, 10.2, 10.3, 10.4)
+$s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+Check 'a lasting change of level (like an unadjusted split) is kept: never "corrected" silently' ($s -and $s.pontos.Count -eq 6) $s.pontos.Count
+$Script:Resposta = Yahoo 'AAPL' 'USD' @(100, 101, 102, 103, 104, 300)
+$s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+Check 'a huge jump on the latest price is kept but flagged in the source row' ($s -and $s.pontos.Count -eq 6 -and $Script:Fontes[-1].erro -match 'latest price \+188% from the previous close') $Script:Fontes[-1].erro
+$r = Remove-PicoIsolado @(@('2026-01-01', 50), @('2026-01-02', 20), @('2026-01-03', 51))
+Check 'a deep isolated dip (to 40% of both neighbours) is also dropped' ($r.removidos -eq 1 -and @($r.pontos).Count -eq 2)
+
+# --- Kraken: os mesmos controlos de preço do Yahoo ---
+$kr = '{"error":[],"result":{"XXBTZEUR":[' + ((0..9 | ForEach-Object { $t = $Script:Agora.AddDays(-9 + $_).ToUnixTimeSeconds(); $c = @('60000', '0', '-5', 'abc', '61000', '62000', '63000', '64000', '65000', '66000')[$_]; "[$t,""1"",""1"",""1"",""$c"",""1"",""1"",1]" }) -join ',') + '],"last":1}}'
+${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) if ($Url -match 'kraken') { return $kr }; throw 'Yahoo offline' }
+$s = Get-Serie ($Ativos | Where-Object { $_.Id -eq 'BTC' })
+Check 'Kraken fallback: zero, negative and non-numeric closes are dropped and counted' ($s -and $s.fonte -eq 'Kraken' -and $s.pontos.Count -eq 7 -and @($s.pontos | Where-Object { $_[1] -le 0 }).Count -eq 0 -and $Script:Fontes[-1].erro -match '3 invalid') "$($s.pontos.Count) / $($Script:Fontes[-1].erro)"
+
+# --- CoinGecko: um campo em falta fica vazio (nunca 0,00 % nem 0 %) ---
+${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout)
+    if ($Url -match 'simple/price') { return '{"bitcoin":{"eur":60000,"usd":70000,"eur_market_cap":1200000000000}}' }
+    if ($Url -match 'coingecko.com/api/v3/global') { return '{"data":{"market_cap_percentage":{"eth":12},"total_market_cap":{"eur":2000000000000}}}' }
+    throw 'offline' }
+$b = Get-DadosBitcoin
+Check 'CoinGecko without the 24 h change: null (the site falls back to the change since 00:00 UTC), not 0.00%' ($b.mercado -and $b.mercado.eur -eq 60000 -and $null -eq $b.mercado.var24 -and $null -eq $b.mercado.volEur -and $b.mercado.capEur -eq 1200000000000) ($b.mercado | ConvertTo-Json -Compress)
+Check 'CoinGecko without the Bitcoin dominance: no 0% shown, the error is listed' ($null -eq $b.mercado.dominio -and @($Script:Fontes | Where-Object { $_.nome -eq 'CoinGecko: Bitcoin dominance' })[-1].estado -eq 'error')
+
+# --- e-mail da SEC: da configuração local, nunca dos argumentos ---
+$cfgDir = Join-Path $env:TEMP ('bb-cfg-' + [guid]::NewGuid().ToString('N').Substring(0, 6)); New-Item -ItemType Directory $cfgDir | Out-Null
+$envAntes = $env:BLUECHIP_SEC_EMAIL
+try {
+    $env:BLUECHIP_SEC_EMAIL = ''
+    $e0 = Get-EmailSecLocal $cfgDir
+    [IO.File]::WriteAllText((Join-Path $cfgDir 'bluechip-board.config.json'), '{ "secEmail": "  me@example.org " }')
+    $e1 = Get-EmailSecLocal $cfgDir
+    [IO.File]::WriteAllText((Join-Path $cfgDir 'bluechip-board.config.json'), '{ "secEmail": "your@email.com" }')
+    $e2 = Get-EmailSecLocal $cfgDir
+    [IO.File]::WriteAllText((Join-Path $cfgDir 'bluechip-board.config.json'), '{ broken')
+    $e3 = Get-EmailSecLocal $cfgDir
+    $env:BLUECHIP_SEC_EMAIL = 'env@example.net'
+    $e4 = Get-EmailSecLocal $cfgDir
+    Check 'SEC e-mail: none without configuration (no warning); trimmed from bluechip-board.config.json' ($e0.email -eq '' -and $e0.aviso -eq '' -and $e1.email -eq 'me@example.org' -and $e1.aviso -eq '')
+    Check 'SEC e-mail: the example placeholder and an unreadable file are refused with a warning' ($e2.email -eq '' -and $e2.aviso -match 'not valid' -and $e3.email -eq '' -and $e3.aviso -match 'could not be read')
+    Check 'SEC e-mail: BLUECHIP_SEC_EMAIL wins over the file' ($e4.email -eq 'env@example.net')
+} finally { $env:BLUECHIP_SEC_EMAIL = $envAntes; Remove-Item $cfgDir -Recurse -Force }
+Check 'static: the scheduled task never gets the SEC e-mail in its arguments' ($texto -notmatch '\$argumentos \+= " -EmailSEC' -and $texto -match 'The SEC e-mail is NOT put in the task')
+
+# --- Nasdaq: segunda fonte para as ações dos EUA, só se coincidir com a execução anterior ---
+function NasdaqHist([string]$Simbolo, $Pts) { '{"data":{"symbol":"' + $Simbolo + '","totalRecords":' + @($Pts).Count + ',"tradesTable":{"rows":[' + ((@($Pts) | Sort-Object { $_[0] } -Descending | ForEach-Object { $q = $_[0].Split('-'); '{"date":"' + "$($q[1])/$($q[2])/$($q[0])" + '","close":"$' + ([double]$_[1]).ToString('#,##0.00', $Script:Inv) + '","volume":"1"}' }) -join ',') + ']}},"status":{"rCode":200}}' }
+$refN = @(for ($i = 0; $i -lt 40; $i++) { , @($Script:Agora.UtcDateTime.AddDays(-60 + $i).ToString('yyyy-MM-dd', $Script:Inv), (1000 + $i)) })
+$hojeNy = [TimeZoneInfo]::ConvertTime($Script:Agora, (Get-FusoNY)).ToString('yyyy-MM-dd', $Script:Inv)
+$nasPts = @($refN) + @(, @($hojeNy, 1100))
+$Script:NasResp = NasdaqHist 'AAPL' $nasPts
+${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) if ($Url -match 'api\.nasdaq\.com/api/quote/AAPL/historical') { return $Script:NasResp }; throw 'Yahoo offline' }
+$aaplN = $Ativos | Where-Object { $_.Id -eq 'AAPL' }
+$s = Get-Serie $aaplN -Referencia $refN
+Check 'Yahoo down: US stock prices from Nasdaq, checked against the previous run, labelled "ok (Nasdaq fallback)"' ($s -and $s.fonte -eq 'Nasdaq' -and $s.moeda -eq 'USD' -and $Script:Fontes[-1].estado -eq 'ok (Nasdaq fallback)' -and $s.pontos[0][1] -eq 1000) ($Script:Fontes[-1] | ConvertTo-Json -Compress)
+Check 'Nasdaq: today''s session still open in New York (before 16:15) is not taken as a close' (@($s.pontos | Where-Object { $_[0] -eq $hojeNy }).Count -eq 0 -and $s.pontos.Count -eq 40) "$($s.pontos.Count) $hojeNy"
+$Script:NasResp = NasdaqHist 'AAPL' @($refN | ForEach-Object { , @($_[0], ($_[1] * 10)) })
+$s = Get-Serie $aaplN -Referencia $refN
+Check 'Nasdaq prices on another split basis (10x the previous run): refused, nothing invented' ($null -eq $s -and $Script:Fontes[-1].estado -eq 'error' -and $Script:Fontes[-1].erro -match 'Nasdaq prices do not match') $Script:Fontes[-1].erro
+$Script:NasResp = NasdaqHist 'AAPL' $refN
+$s = Get-Serie $aaplN -Referencia @($refN | Select-Object -First 10)
+Check 'Nasdaq without enough dates to compare with the previous run: not used' ($null -eq $s -and $Script:Fontes[-1].erro -match 'could not be checked')
+$s = Get-Serie $aaplN
+Check 'Nasdaq on a fresh install (no previous run): not used' ($null -eq $s -and $Script:Fontes[-1].erro -match 'could not be checked')
+$Script:NasResp = NasdaqHist 'MSFT' $refN
+$s = Get-Serie $aaplN -Referencia $refN
+Check 'Nasdaq answer for another symbol: refused' ($null -eq $s -and $Script:Fontes[-1].erro -match "returned 'MSFT'")
+$Script:NasResp = '{"data":null,"message":null,"status":{"rCode":400,"bCodeMessage":[{"code":1001,"errorMessage":"Symbol not exists."}]}}'
+$s = Get-Serie $aaplN -Referencia $refN
+Check 'Nasdaq error answer: refused with its message' ($null -eq $s -and $Script:Fontes[-1].erro -match 'Symbol not exists')
+
+# --- Get-Url: uma resposta definitiva (404) não é repetida; um erro temporário é ---
+Add-Type -TypeDefinition 'public class BbTesteResp { public int StatusCode; public BbTesteResp(int c) { StatusCode = c; } } public class BbTesteHttp : System.Exception { public object Response; public BbTesteHttp(string m, int c) : base(m) { Response = new BbTesteResp(c); } }' -ErrorAction SilentlyContinue
+$fnUrl = $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-Url' }, $true) | Select-Object -First 1
+. ([scriptblock]::Create($fnUrl.Extent.Text.Replace('function Get-Url {', 'function Get-UrlOriginal {')))
+$Script:Chamadas = 0
+function Invoke-WebRequest { $Script:Chamadas++; throw (New-Object BbTesteHttp ('HTTP ' + $Script:Codigo), $Script:Codigo) }
+function Start-Sleep { }
+$Script:Codigo = 404; try { Get-UrlOriginal 'https://example.com/x' | Out-Null } catch { }
+$c404 = $Script:Chamadas; $Script:Chamadas = 0
+$Script:Codigo = 500; try { Get-UrlOriginal 'https://example.com/x' | Out-Null } catch { }
+$c500 = $Script:Chamadas
+Remove-Item function:Invoke-WebRequest, function:Start-Sleep
+Check 'download: a permanent answer (404) is not retried; a server error (500) is retried once' ($c404 -eq 1 -and $c500 -eq 2) "404: $c404 call(s), 500: $c500"
+
+# --- iShares: mudança de formato do ficheiro dita na fonte ---
+${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) return $Script:Ficheiros['251861'] }
+$Script:Ficheiros['251861'] = (iShares 'IE00B4K48X80' $linhasEU).Replace('>Market Currency<', '>Currency X<')
+$r = Get-PesosETF $eunk
+Check 'iShares file without the Market Currency column: weights still read, the source row names the missing column and the Unavailable breakdown' ($r.aoVivo -and $Script:Fontes[-1].estado -eq 'ok' -and $Script:Fontes[-1].erro -match 'no column Market Currency' -and $Script:Fontes[-1].erro -match 'currency breakdown Unavailable') $Script:Fontes[-1].erro
 
 Write-Host 'Static checks'
 Check 'TLS is not pinned to 1.2 when Windows chooses (SystemDefault)' ($texto -notmatch '\]::SecurityProtocol -bor \[Net\.SecurityProtocolType\]::Tls12')
