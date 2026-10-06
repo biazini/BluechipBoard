@@ -1,0 +1,12 @@
+# Line endings: the scripts must keep LF (and their UTF-8 BOM); git must not convert them to CRLF on Windows
+* text=auto eol=lf
+*.ps1 text eol=lf
+*.js text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+
+# Reference files compared byte by byte by Test-Site (UTF-8 BOM and CRLF on purpose)
+Tests/fixtures/taxBaseline/*.csv -text
+
+*.ico binary

@@ -1,0 +1,47 @@
+name: tests
+
+# The three test suites on Windows, on PowerShell 7 and Windows PowerShell 5.1, for every push to main and every pull
+# request. They need no internet and no personal data: in a clone, the site tests use Tests/fixtures/bluechip-board-data.sample.json.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Engine (PowerShell 7)
+        shell: pwsh
+        run: ./Tests/Test-Engine.ps1
+
+      - name: Engine (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./Tests/Test-Engine.ps1
+
+      - name: Resilience (PowerShell 7)
+        shell: pwsh
+        run: ./Tests/Test-Resilience.ps1 -Shell pwsh
+
+      - name: Resilience (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./Tests/Test-Resilience.ps1
+
+      - name: Site (headless Chrome, PowerShell 7)
+        shell: pwsh
+        run: ./Tests/Test-Site.ps1
+
+      - name: Site (headless Chrome, Windows PowerShell 5.1)
+        shell: powershell
+        run: ./Tests/Test-Site.ps1

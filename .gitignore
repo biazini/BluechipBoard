@@ -1,0 +1,20 @@
+# Personal data: stays on this PC only, never in git
+bluechip-board-backup.json
+bluechip-board-backup.previous.json
+bluechip-board-backup*.json
+bluechip-board.config.json
+
+# Outputs rebuilt on every run (the main site embeds your backup)
+bluechip-board.html
+bluechip-board-data.json
+noticias-historico.json
+noticias-historico.json.bad
+vistos.json
+Archive/
+*.tmp
+
+# Editors and OS
+.vs/
+.vscode/
+Thumbs.db
+desktop.ini
