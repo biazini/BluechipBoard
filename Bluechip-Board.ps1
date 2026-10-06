@@ -2667,7 +2667,7 @@ const AL=Object.assign({},LV,{white:Object.assign({},LV.white,{n:'Info',i:'info'
 const TIER={primaria:'Primary source',referencia:'Leading press',outra:'Other source',cuidado:'Handle with care'};
 const TABN={overview:'overview',portfolio:'portfolio',news:'news',prices:'prices',fundamentals:'fundamentals',fx:'currency',calendar:'calendar',etf:'ETF',bitcoin:'Bitcoin',sources:'sources'};
 const SENT={positivo:'positive',negativo:'negative',misto:'mixed',neutro:'neutral'};
-const coTag=(c,chip)=>CO[c]?`<span class="co${chip?' co-chip':''}" style="--c:${CO[c].c}">${CO[c].n}</span>`:'';
+const coTag=(c,chip)=>CO[c]?`<span class="co${chip?' co-chip':''}" style="--c:${CO[c].c}">${esc(CO[c].n)}</span>`:'';
 const S0={co:'all',per:'1A',cur:'EUR',lvl:'all',lim:60};const st=Object.assign({},S0);
 const dias=n=>n+(n===1?' day':' days');
 const ago=t=>{if(!t)return'no date';const m=(GEN-t)/6e4;if(m<60)return`${Math.max(1,Math.round(m))} min ago`;const h=m/60;if(h<24)return`${Math.round(h)} h ago`;return`${dias(Math.round(h/24))} ago`;};
@@ -2680,7 +2680,7 @@ const MERC=arr(D.mercado).map(a=>Object.assign({},a,{pts:toPts(a.pontos)}));
 /* ETF: os da configuração do script ($ETFs → D.etfs; o SXR8 também em D.etf, o formato anterior). O SXR8 vem sempre
    primeiro e é o ETF por omissão. Um ETF novo na configuração aparece em todo o site sem mudar este código. */
 const ETFD=Object.assign({},D.etf&&typeof D.etf==='object'?{SXR8:D.etf}:{},D.etfs&&typeof D.etfs==='object'&&!Array.isArray(D.etfs)?D.etfs:{});
-const ETF_IDS=[...new Set(['SXR8'].concat(Object.keys(ETFD),ATIVOS.filter(a=>a.tipo==='ETF').map(a=>a.id)))].filter(id=>id==='SXR8'||ATIVOS.some(a=>a.id===id));
+const ETF_IDS=[...new Set(['SXR8'].concat(Object.keys(ETFD),ATIVOS.filter(a=>a.tipo==='ETF').map(a=>a.id)))].filter(id=>/^[A-Za-z0-9._-]{1,15}$/.test(id)&&(id==='SXR8'||ATIVOS.some(a=>a.id===id)));   /* ids simples: entram em atributos e chaves */
 const ehEtf=id=>ETF_IDS.includes(id),etfInfo=id=>ETFD[id]&&typeof ETFD[id]==='object'?ETFD[id]:{};
 const etfIdx=id=>etfInfo(id).indice||(id==='SXR8'?'S&P 500':id),etfAcum=id=>etfInfo(id).acumulacao!==false;
 ETF_IDS.forEach(id=>{if(!CO[id])CO[id]={n:'ETF '+id,c:'var(--macro)',i:'pie'};});
@@ -2828,8 +2828,10 @@ function alerts(){const out=[],add=(l,co,txt,tab)=>out.push({l,co,txt,tab});
   else if(fr&&fr.velho)add('orange',a.id,`${nm}: the latest price is from ${fdS(fr.iso)}, ${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind. The source may be lagging, so the figures for ${a.nome} are not current.`,'sources');
   /* a Bitcoin é várias vezes mais volátil do que as ações: os limiares são mais largos para não alertar todos os dias */
   const btc=a.id==='BTC',L=btc?{d:6,o:-30,y:-15}:{d:4,o:-20,y:-10},bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&isFinite(bm.var24)?+bm.var24:null;
-  const mv=btc&&v24!=null?v24:s.d1,sess=btc?(v24!=null?'over the last 24 hours':'since 00:00 UTC'):(a.parcial?'so far today':'in the last session');
-  if(mv!=null&&Math.abs(mv)>=L.d)add('orange',a.id,`${nm} ${mv>0?'rose':'fell'} ${nf(Math.abs(mv))}% ${sess}. Look for the cause in today's news.`,'news');
+  /* dados atrasados ou da execução anterior: o movimento não é de hoje, e a mensagem diz de quando é (a variação de 24 h da
+     CoinGecko é sempre atual) */
+  const velho=antigo(a)||!!(fr&&fr.velho),mv=btc&&v24!=null?v24:s.d1,sess=btc&&v24!=null?'over the last 24 hours':velho&&fr?`on ${fdS(fr.iso)} (the latest price available, not today)`:btc?'since 00:00 UTC':(a.parcial?'so far today':'in the last session');
+  if(mv!=null&&Math.abs(mv)>=L.d)add('orange',a.id,`${nm} ${mv>0?'rose':'fell'} ${nf(Math.abs(mv))}% ${sess}. Look for the cause in ${velho&&!(btc&&v24!=null)?'the news of that day':"today's news"}.`,'news');
   if(s.dist!=null){
    if(s.dist<=L.o)add('orange',a.id,btc?`${nm} is ${nf(Math.abs(s.dist))}% below its 52-week high. Look for the cause (regulation, ETF flows, rates) in the news.`:`${nm} is ${nf(Math.abs(s.dist))}% below its 52-week high. Check whether expected earnings have also fallen (volatility or deterioration?).`,btc?'bitcoin':'prices');
    else if(s.dist<=L.y)add('yellow',a.id,`${nm} is ${nf(Math.abs(s.dist))}% below its 52-week high.`,btc?'bitcoin':'prices');
@@ -2957,11 +2959,12 @@ function drawMoves(){const box=$('#tbl-moves'),nt=$('#movesNote');if(!box)return
 function reacoes(id){const r=D.resultadosSec&&typeof D.resultadosSec==='object'?D.resultadosSec[id]:null;
  if(!r||typeof r!=='object')return{ok:false,motivo:'no SEC data in this data file (it is collected with -EmailSEC, as the desktop shortcut does, from the next run)'};
  if(r.estado!=='ok'&&r.estado!=='previous run')return{ok:false,motivo:r.estado==='skipped'?'the SEC data was not collected (run the script with -EmailSEC)':'the SEC source failed'+(r.erro?': '+String(r.erro):'')};
- const H=HIST[id]||[],ts=H.map(p=>p[0]),R=arr(r.resultados),C=[];
+ /* um preço intradiário (sessão ainda aberta quando a página foi gerada) não é um fecho: não conta como reação */
+ const a=ATIVOS.find(x=>x.id===id),H0=HIST[id]||[],H=a&&a.parcial&&H0.length&&a.pts.length&&H0[H0.length-1][0]>=a.pts[a.pts.length-1][0]?H0.slice(0,-1):H0,ts=H.map(p=>p[0]),R=arr(r.resultados),C=[];
  R.forEach(x=>{if(!x||!isoOk(x.sessao))return;const t=Date.parse(x.sessao+'T00:00:00Z'),i=ts.indexOf(t);if(i<1)return;const p0=H[i-1][1];C.push({x,t,r1:(H[i][1]/p0-1)*100,r5:i+4<H.length?(H[i+4][1]/p0-1)*100:null});});
  C.sort((a,b)=>b.t-a.t);const ab=C.map(c=>Math.abs(c.r1)).sort((a,b)=>a-b),n=ab.length,med=n?(n%2?ab[(n-1)/2]:(ab[n/2-1]+ab[n/2])/2):null;
  return{ok:true,C,med,sem:R.length-C.length,ant:r.estado==='previous run',fonte:String(r.fonte||'')};}
-const QUANDO={after:'after the close',before:'before the open',during:'during the session'};
+const QUANDO={after:'after the close',before:'before the open',during:'during the session',closed:'exchange closed that day'};
 function drawEarn(){const box=$('#tbl-earn'),cs=$('#earnCases');if(!box)return;const ids=['AAPL','NVDA','GOOGL'].filter(id=>st.co==='all'||st.co===id),L=ids.map(id=>({id,E:reacoes(id)}));
  const quando=x=>`${fdS(x.entrega)}${x.horaNY?`, ${esc(x.horaNY.slice(11))} New York (${QUANDO[x.quando]||''})`:''}`;
  box.innerHTML='<thead><tr><th scope="col">Company</th><th scope="col">Latest earnings</th><th class="num" scope="col">Reaction session</th><th class="num" scope="col">After 5 sessions</th><th class="num" scope="col">Median move (absolute)</th><th class="num" scope="col">Cases</th></tr></thead><tbody>'+(L.length?L.map(({id,E})=>{
@@ -3117,7 +3120,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
   $('#btcHalv').innerHTML=`<div class="big-v"><b>${nf(dd,0)}</b><span class="muted">days (forecast)</span></div><div class="prog" role="img" aria-label="${nf(pr,1)}% of the current cycle"><i style="width:${pr}%"></i></div><div class="fng-lbl"><span>Block ${nf(ini,0)}</span><span>${nf(pr,1)}% of the cycle</span><span>${nf(rd.halvingAltura,0)}</span></div><ul class="kv"><li>Expected date<b>${isFinite(tH)?fdt(tH):'—'}</b></li><li>Remaining<b>${nf(rd.blocosFalta,0)} blocks</b></li><li>Block reward<b>${bt(rd.recompensa)} → ${bt(rd.recompensaNova)} BTC</b></li></ul>`;}
  else empty($('#btcHalv'),'No network data in this run.');
  const R=[];if(rd){R.push(['Current block',nf(rd.altura,0)],['Average block time',nf(rd.minBloco,1)+' min'+(rd.minBlocoEpoca?` · ${nf(rd.minBlocoEpoca,2)} min since the last halving (used for the forecast)`:'')],['Hash rate',rd.hashrateEH!=null?nf(rd.hashrateEH,0)+' EH/s':'—']);if(rd.ajusteDif!=null)R.push(['Next difficulty adjustment',pct(rd.ajusteDif)+(rd.ajusteData?' · '+fdt(Date.parse(rd.ajusteData)):'')]);}
- if(m){R.push(['Market cap','€'+grande(m.capEur)],['24 h volume','€'+grande(m.volEur)]);if(m.dominio!=null)R.push(['Share of the crypto market',nf(m.dominio,1)+'%']);}
+ if(m){R.push(['Market cap',m.capEur!=null?'€'+grande(m.capEur):'—'],['24 h volume',m.volEur!=null?'€'+grande(m.volEur):'—']);if(m.dominio!=null)R.push(['Share of the crypto market',nf(m.dominio,1)+'%']);}
  if(R.length)$('#btcRede').innerHTML=`<ul class="kv" style="margin-top:0">${R.map(r=>`<li>${r[0]}<b>${r[1]}</b></li>`).join('')}</ul>`;else empty($('#btcRede'),'No network or market data in this run.');
  const g2=g?[Object.assign({},g,{moeda:g.moeda||'USD'})]:[],cr=ATIVOS.filter(x=>x.id!=='BTC').concat(g2).map(x=>({x,v:corr(p,inCur(x,'EUR'))})).filter(o=>o.v!=null);
  barChart($('#ch-corr'),{cats:cr.map(o=>nmOf(o.x)),series:[{n:'Correlation',c:'var(--btc)',colors:cr.map(o=>colorOf(o.x)),values:cr.map(o=>o.v)}],dec:2,tdec:1,label:'Correlation of Bitcoin with the other assets'});
@@ -3128,7 +3131,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
 /* ---------- dados guardados neste browser (carteira, compras de Bitcoin, simuladores) ---------- */
 /* nada sai do computador: fica no localStorage do browser; o backup em ficheiro protege contra limpezas do browser */
 /* set: guarda e, se forem dados da carteira, marca a hora da alteração e grava no ficheiro de backup; raw: só guarda */
-const store={get(k,d){try{const v=localStorage.getItem('bb.'+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set(k,v){try{localStorage.setItem('bb.'+k,JSON.stringify(v));if(/^(buys|lots|sales|deleted|targets|policy|notes|fees)$/.test(k)){localStorage.setItem('bb.savedAt',JSON.stringify(new Date().toISOString()));aoMudar();}return true;}catch(e){return false;}},
+const store={get(k,d){try{const v=localStorage.getItem('bb.'+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set(k,v){try{localStorage.setItem('bb.'+k,JSON.stringify(v));if(/^(buys|lots|sales|deleted|targets|policy|notes|fees)$/.test(k)){localStorage.setItem('bb.savedAt',JSON.stringify(new Date().toISOString()));ALTEROU=true;aoMudar();}return true;}catch(e){return false;}},
  raw(k,v){try{localStorage.setItem('bb.'+k,JSON.stringify(v));return true;}catch(e){return false;}}};
 const eur=(v,d=0)=>(v==null||!isFinite(v))?'—':(v<0?'−':'')+'€'+nf(Math.abs(v),d);
 /* o sinal segue o valor arredondado: −€0,08 com 0 casas decimais aparece como €0 e não como −€0 */
@@ -3410,9 +3413,10 @@ function buildPf(){const t=$('#tbl-pf');if(!t)return;
 function pfDados(){const C=carteira();
  return PF.map(([id,n,u])=>{const L=arr(C.lotes[id]),V=C.vendas.filter(v=>v.a===id),q=L.reduce((s,x)=>s+x.q,0),c=L.reduce((s,x)=>s+x.q*x.cu,0),real=V.reduce((s,v)=>s+(v.real||0),0);
   const src=(L.length?`${L.length} purchase${L.length>1?'s':''}`:'No purchases yet')+(V.length?` · ${V.length} sale${V.length>1?'s':''}`:'');
-  const p=lastEur(id),v=q>1e-12&&p!=null?q*p:null,g=v!=null&&c>0?v-c:null,a=ATIVOS.find(x=>x.id===id),s=a?stats(inCur(a,'EUR')):null;
-  return{id,n,u,q,c,p,v,g,real,vendas:V.length,src,d1:s?s.d1:null,semPreco:q>1e-12&&p==null};});}
-function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a+(x.v||0),0),G=R.filter(x=>x.g!=null),tg=G.reduce((a,x)=>a+x.g,0),tc=G.reduce((a,x)=>a+x.c,0),dia=R.reduce((a,x)=>a+(x.v&&x.d1!=null?x.v*x.d1/(100+x.d1):0),0),real=R.reduce((a,x)=>a+x.real,0),nv=R.reduce((a,x)=>a+x.vendas,0),falta=R.filter(x=>x.semPreco);
+  const p=lastEur(id),v=q>1e-12&&p!=null?q*p:null,g=v!=null&&c>0?v-c:null,a=ATIVOS.find(x=>x.id===id),s=a?stats(inCur(a,'EUR')):null,fr=a?frescura(id,a.pts):null;
+  /* velho: o último preço é da execução anterior ou está atrasado em relação à bolsa (o seu "último dia" não é o de hoje) */
+  return{id,n,u,q,c,p,v,g,real,vendas:V.length,src,d1:s?s.d1:null,velho:!!a&&(antigo(a)||!!(fr&&fr.velho)),semPreco:q>1e-12&&p==null};});}
+function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a+(x.v||0),0),G=R.filter(x=>x.g!=null),tg=G.reduce((a,x)=>a+x.g,0),tc=G.reduce((a,x)=>a+x.c,0),dia=R.reduce((a,x)=>a+(x.v&&x.d1!=null&&!x.velho?x.v*x.d1/(100+x.d1):0),0),diaFora=R.filter(x=>x.v&&x.velho),real=R.reduce((a,x)=>a+x.real,0),nv=R.reduce((a,x)=>a+x.vendas,0),falta=R.filter(x=>x.semPreco);
  drawDiv(R);drawRet(R);drawTgt(R);drawPol();drawStress(R);drawExpo(R);
  R.forEach(x=>{$('#pf-q-'+x.id).textContent=x.q>1e-12?btcF(x.q):'—';$('#pf-c-'+x.id).textContent=x.c>0?eur(x.c,2):'—';$('#pf-p-'+x.id).textContent=eur(x.p,2);$('#pf-v-'+x.id).textContent=x.v!=null?eur(x.v,2):(x.semPreco?'no price':'—');
   const gc=$('#pf-g-'+x.id);gc.className='num '+cls(x.g);gc.innerHTML=x.g!=null?`${eurS(x.g,2)} <small>${pct(x.g/x.c*100)}</small>`:'—';
@@ -3420,7 +3424,7 @@ function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a
  $('#pf-tv').textContent=tv?eur(tv,2):'—';$('#pf-tc').textContent=tc?eur(tc,2):'—';const tgc=$('#pf-tg');tgc.className='num '+(G.length?cls(tg):'');tgc.innerHTML=G.length?`${eurS(tg,2)} <small>${tc?pct(tg/tc*100):''}</small>`:'—';$('#pf-tw').textContent=tv?'100%':'—';
  if(!tv){$('#pfKpis').innerHTML=`<p class="empty">${ic('wallet')}${falta.length?`No current price for ${falta.map(x=>esc(x.n)).join(', ')} in this run (see Sources &amp; method), so the portfolio cannot be valued.`:'Add your purchases below (and Bitcoin purchases in the Bitcoin section) to see your portfolio in euros.'}</p>`;empty($('#ch-pf-alloc'),'Nothing to show yet.');empty($('#ch-pf-exp'),'Nothing to show yet.');return;}
  $('#pfKpis').innerHTML=kpi('wallet','Portfolio value',eur(tv),falta.length?`without ${falta.map(x=>esc(x.n)).join(', ')} (no current price)`:'in euros, at the latest prices')+kpi('euro','Invested',eur(tc),nv?'cost of what you still hold':'total paid')+kpi('chart','Gain',eurS(tg),tc?pct(tg/tc*100):'',cls(tg))+
-  (nv?kpi('check','Realised gain',eurS(real),`on ${nv} sale${nv>1?'s':''} (oldest purchases first)`,cls(real)):'')+kpi('activity','Latest daily move',eurS(dia),'last session (Bitcoin: since 00:00 UTC)',cls(dia));
+  (nv?kpi('check','Realised gain',eurS(real),`on ${nv} sale${nv>1?'s':''} (oldest purchases first)`,cls(real)):'')+kpi('activity','Latest daily move',eurS(dia),'last session (Bitcoin: since 00:00 UTC)'+(diaFora.length?` · without ${diaFora.map(x=>esc(x.n)).join(', ')} (price not current)`:''),cls(dia));
  const fat=R.filter(x=>x.v>0).map(x=>[ehEtf(x.id)?'ETF '+x.id:x.n,x.v/tv*100,CO[x.id].c,x.v]);
  $('#ch-pf-alloc').innerHTML='<div class="dist" role="img" aria-label="'+fat.map(x=>`${x[0]} ${nf(x[1],1)}%`).join(', ')+'">'+fat.map(x=>`<div data-tip="${esc(x[0])}: ${nf(x[1],1)}% (${eur(x[3])})" style="width:${x[1]}%;background:${x[2]}"></div>`).join('')+'</div><ul class="etf-legend">'+fat.map(x=>`<li style="--c:${x[2]}"><span class="dot"></span><span class="nm">${esc(x[0])}</span><span class="bar"><i style="width:${x[1]}%"></i></span><b>${nf(x[1],1)}%</b></li>`).join('')+'</ul>';
  /* exposição real: o que tem diretamente + o que tem através de cada ETF (valor do ETF × peso da empresa nesse fundo).
@@ -3642,7 +3646,10 @@ function drawExpo(R){if(!$('#expoOut'))return;const X=exposicao(R);
    recente: são pagamentos futuros, por isso não se usa a taxa da data de compra. SXR8 (acumulação) e Bitcoin ficam de fora.
    Sem dados (fonte em falha, dados com mais de 180 dias, resposta inválida) mostra "Unavailable", nunca €0. */
 /* as empresas com dividendos recolhidos pelo script; um ETF de acumulação nunca entra (os dividendos ficam no preço) */
-const DIV_IDS=[...new Set(['AAPL','NVDA','GOOGL'].concat(D.dividendos&&typeof D.dividendos==='object'&&!Array.isArray(D.dividendos)?Object.keys(D.dividendos):[]))].filter(id=>!(ehEtf(id)&&etfAcum(id))&&id!=='BTC'&&PF.some(p=>p[0]===id)),DIV_MAX_DIAS=180,c2=v=>Math.round(v*100)/100;
+const DIV_IDS=[...new Set(['AAPL','NVDA','GOOGL'].concat(D.dividendos&&typeof D.dividendos==='object'&&!Array.isArray(D.dividendos)?Object.keys(D.dividendos):[]))].filter(id=>!(ehEtf(id)&&etfAcum(id))&&id!=='BTC'&&PF.some(p=>p[0]===id)),DIV_MAX_DIAS=180,
+ /* arredonda aos cêntimos, metade para longe do zero, sobre o valor decimal (15 algarismos): 1.005 × 100 dá
+    100.49999999999999 em vírgula flutuante, e Math.round sozinho daria €1.00 em vez de €1.01 */
+ c2=v=>{if(v==null||!isFinite(v))return v;const x=Math.round(+(Math.abs(v)*100).toPrecision(15))/100;return v<0?-x:x;};
 function divDados(id){const v=D.dividendos&&D.dividendos[id];if(!v||typeof v!=='object')return{ok:false,motivo:'No dividend data in this run'};
  if(v.estado!=='ok'&&v.estado!=='previous run')return{ok:false,motivo:'Source failed'+(v.erro?': '+v.erro:'')};
  const t=Date.parse(v.obtidoEm||''),a=v.anualPorAcao==null||v.anualPorAcao===''?NaN:+v.anualPorAcao,y=v.rendimentoPct==null?NaN:+v.rendimentoPct,u=pair(v.ultimo);
@@ -3838,9 +3845,12 @@ function limpaAlvos(t){if(!t||typeof t!=='object'||!t.weights||typeof t.weights!
  if(Math.abs(s-100)>0.01)return null;const b=+t.band,m=+t.monthly,ta=Date.parse(t.at||'');
  return{weights:w,band:isFinite(b)&&b>0&&b<=50?b:5,monthly:isFinite(m)&&m>=0?m:0,at:isFinite(ta)?new Date(ta).toISOString():null};}
 /* valida tudo o que vem de um ficheiro (o deste projeto ou um restaurado) antes de o usar */
-function limpaBackup(d){const ok=x=>x&&typeof x==='object'&&/^\d{4}-\d{2}-\d{2}$/.test(x.d),num=v=>+v,
-  /* id estável mesmo nas cópias antigas sem id, para juntar o mesmo ficheiro duas vezes não duplicar nada */
-  nid=(x,a)=>x.id!=null&&x.id!==''?String(x.id):['x',a,x.d,x.q,x.p!=null?x.p:x.c].join('_'),
+function limpaBackup(d){const ok=x=>x&&typeof x==='object'&&/^\d{4}-\d{2}-\d{2}$/.test(x.d),
+  /* só números (ou texto numérico): +true, +null, +'' e +[5] davam 1, 0, 0 e 5, e um custo em falta passava a €0 */
+  num=v=>typeof v==='number'?v:typeof v==='string'&&/^\s*[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?\s*$/i.test(v)?+v:NaN,
+  /* id estável mesmo nas cópias antigas sem id, para juntar o mesmo ficheiro duas vezes não duplicar nada; duas entradas
+     iguais (mesmo ativo, data, quantidade e preço, por exemplo duas compras iguais no mesmo dia) ficam ambas, com #2, #3… */
+  rep={},nid=(x,a)=>{if(x.id!=null&&x.id!=='')return String(x.id);const b=['x',a,x.d,x.q,x.p!=null?x.p:x.c].join('_');rep[b]=(rep[b]||0)+1;return rep[b]>1?b+'#'+rep[b]:b;},
   ref=r=>Array.isArray(r)&&r.length===2&&/^\d{4}-\d{2}-\d{2}$/.test(r[0])&&+r[1]>0?[r[0],+r[1]]:null,bas=u=>/^\d{4}-\d{2}-\d{2}$/.test(u||'')?u:null,
   base=(o,x)=>{const r=ref(x.r),u=bas(x.u);if(r)o.r=r;if(u)o.u=u;return o;};
  const buys=arr(d.buys).concat(arr(d.etfLots).map(x=>Object.assign({a:'SXR8'},x))).filter(x=>ok(x)&&BUY_IDS.includes(x.a)&&num(x.q)>0&&num(x.p)>0).map(x=>base({id:nid(x,x.a),a:x.a,d:x.d,q:num(x.q),p:num(x.p)},x));
@@ -3882,7 +3892,8 @@ function juntaBackup(d,projeto){const F=limpaBackup(d),L0=listasLocais(),del0=ap
  return{novos,saem,extraLocal,alvos,pol,notas,fees,n:{buys:res.buys.length,lots:res.lots.length,sales:res.sales.length}};}
 /* o "puxador" do ficheiro escolhido fica no IndexedDB deste browser, para não ser preciso escolher a pasta outra vez */
 function idb(mode,fn){return new Promise((res,rej)=>{let o;try{o=indexedDB.open('bluechip-board',1);}catch(e){rej(e);return;}o.onupgradeneeded=()=>o.result.createObjectStore('h');o.onerror=()=>rej(o.error);
- o.onsuccess=()=>{const db=o.result,tx=db.transaction('h',mode),r=fn(tx.objectStore('h'));tx.oncomplete=()=>{db.close();res(r&&r.result);};tx.onerror=()=>{db.close();rej(tx.error);};};});}
+ o.onsuccess=()=>{const db=o.result;let tx,r;try{tx=db.transaction('h',mode);r=fn(tx.objectStore('h'));}catch(e){db.close();rej(e);return;}  /* sem isto um erro aqui deixava a promessa por resolver */
+  tx.oncomplete=()=>{db.close();res(r&&r.result);};tx.onerror=()=>{db.close();rej(tx.error);};tx.onabort=()=>{db.close();rej(tx.error);};};});}
 const marcaGravado=sv=>{store.raw('fileSaved',sv);store.raw('fileWrittenAt',new Date().toISOString());};
 /* descarrega um ficheiro gerado na página (fica só neste computador) */
 function baixa(nome,txt,tipo){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:tipo}));a.download=nome;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);}
@@ -3892,18 +3903,39 @@ async function guardaFicheiro(interativo){const dadosB=dadosBackup(),txt=JSON.st
  if(!window.showSaveFilePicker||!window.indexedDB){if(interativo)descarrega(txt,dadosB.saved);else{AUTO=false;estadoBk();}return;}
  try{if(!FH)FH=(await idb('readonly',s=>s.get('file')).catch(()=>null))||null;
   if(FH){let p=await FH.queryPermission({mode:'readwrite'});if(p!=='granted'&&interativo)p=await FH.requestPermission({mode:'readwrite'});if(p!=='granted'){if(!interativo){AUTO=false;estadoBk();return;}FH=null;}}
-  if(!FH){if(!interativo){AUTO=false;estadoBk();return;}FH=await window.showSaveFilePicker({id:'bluechip-board',startIn:'documents',suggestedName:BK_NOME,types:[{description:'Bluechip Board backup',accept:{'application/json':['.json']}}]});await idb('readwrite',s=>s.put(FH,'file')).catch(()=>{});}
+  if(!FH){if(!interativo){AUTO=false;estadoBk();return;}
+   /* escolhe-se a PASTA e confirma-se logo que é a do projeto (tem o bluechip-board.html): uma pasta errada é recusada já,
+      em vez de só se saber na execução seguinte do script. Sem seletor de pastas, o seletor de ficheiro de antes. */
+   if(window.showDirectoryPicker){const dir=await window.showDirectoryPicker({id:'bluechip-board',mode:'readwrite',startIn:'documents'});
+    let doProjeto=false;try{await dir.getFileHandle('bluechip-board.html');doProjeto=true;}catch(e){}
+    if(!doProjeto){bkMsg(`The folder "${dir.name}" has no bluechip-board.html, so it is not the BluechipBoard project folder: nothing was saved. Click Save to project folder again and choose the folder where bluechip-board.html and the script are.`);estadoBk();return;}
+    FH=await dir.getFileHandle(BK_NOME,{create:true});}
+   else FH=await window.showSaveFilePicker({id:'bluechip-board',startIn:'documents',suggestedName:BK_NOME,types:[{description:'Bluechip Board backup',accept:{'application/json':['.json']}}]});
+   await idb('readwrite',s=>s.put(FH,'file')).catch(()=>{});}
   const w=await FH.createWritable();await w.write(txt);await w.close();
   AUTO=true;marcaGravado(dadosB.saved);estadoBk();
   bkMsg(`Saved to ${FH.name} at ${hmL(Date.now())}. It must be in the BluechipBoard folder, next to bluechip-board.html, for the site to load it. While this page is open, every change is saved there automatically.`);
  }catch(e){if(e&&e.name==='AbortError'){bkMsg('Save cancelled.');return;}AUTO=false;estadoBk();if(interativo)descarrega(txt,dadosB.saved);}}
 const resumoBk=n=>`${n.buys} stock and ETF purchase${n.buys===1?'':'s'}, ${n.lots} Bitcoin purchase${n.lots===1?'':'s'} and ${n.sales} sale${n.sales===1?'':'s'}`;
-function aoMudar(){clearTimeout(bkT);bkT=setTimeout(()=>guardaFicheiro(false),800);estadoBk();}
+function aoMudar(){pedeAuto();clearTimeout(bkT);bkT=setTimeout(()=>guardaFicheiro(false),800);estadoBk();}
+/* Depois de reabrir a página, o browser só dá de novo acesso ao ficheiro com um gesto do utilizador. A primeira alteração
+   feita aqui (um clique em Add, Save, Remove…) é esse gesto: pede-se logo a autorização, uma vez por página, e com ela as
+   gravações automáticas voltam. Sem gesto o pedido é recusado pelo browser e fica para a alteração seguinte. */
+let PEDIU=false,ALTEROU=false;
+function pedeAuto(){if(AUTO||PEDIU||!FH||typeof FH.requestPermission!=='function')return;let p;try{p=FH.requestPermission({mode:'readwrite'});}catch(e){return;}PEDIU=true;
+ Promise.resolve(p).then(r=>{if(r==='granted'){AUTO=true;clearTimeout(bkT);guardaFicheiro(false);}else estadoBk();},()=>{PEDIU=false;});}
+/* ao abrir: o ficheiro ligado (se o browser o guardou) e, se a autorização ainda estiver dada (alguns browsers deixam-na
+   "em todas as visitas"), as gravações automáticas ficam logo ativas e o que faltar no ficheiro é gravado */
+function ligaFicheiro(){if(!window.showSaveFilePicker||!window.indexedDB)return Promise.resolve(null);
+ return idb('readonly',s=>s.get('file')).then(h=>{if(!h)return null;if(!FH)FH=h;
+  return Promise.resolve(h.queryPermission?h.queryPermission({mode:'readwrite'}):'prompt').then(p=>{if(p==='granted'){AUTO=true;if(pendente())guardaFicheiro(false);else estadoBk();}return h;},()=>h);}).catch(()=>null);}
 /* caixa de estado: diz quando o browser tem alterações que ainda não estão no ficheiro de backup */
-function estadoBk(){const el=$('#bkState');if(!el)return;const L=listasLocais(),tem=L.buys.length+L.lots.length+L.sales.length+Object.keys(apagados()).length>0||store.get('targets',null)!=null||store.get('policy',null)!=null||Object.keys(notasAtuais()).length>0;
- const sa=Date.parse(store.get('savedAt',null)||''),ref=[store.get('fileSaved',null),D.backup&&(D.backup.saved||D.backup.exported)].map(x=>Date.parse(x||'')).filter(isFinite),ft=ref.length?Math.max(...ref):NaN;
- const pend=tem&&isFinite(sa)&&(!isFinite(ft)||sa>ft+1000);
- el.innerHTML=pend?`<div class="callout warn">${ic('triangle')}<div><b>Some changes are not in the backup file yet.</b> ${AUTO?'Saving them now…':'Automatic saving is off on this page (the browser asks for permission again each time the page is reopened). Click <b>Save to project folder</b> to update bluechip-board-backup.json.'}</div></div>`:
+/* o browser tem dados (entradas, apagamentos, alvos, política ou notas) e alterações mais recentes do que o ficheiro de backup? */
+function temDados(){const L=listasLocais();return L.buys.length+L.lots.length+L.sales.length+Object.keys(apagados()).length>0||store.get('targets',null)!=null||store.get('policy',null)!=null||Object.keys(notasAtuais()).length>0;}
+function refFicheiro(){const ref=[store.get('fileSaved',null),D.backup&&(D.backup.saved||D.backup.exported)].map(x=>Date.parse(x||'')).filter(isFinite);return ref.length?Math.max(...ref):NaN;}
+function pendente(){const sa=Date.parse(store.get('savedAt',null)||''),ft=refFicheiro();return temDados()&&isFinite(sa)&&(!isFinite(ft)||sa>ft+1000);}
+function estadoBk(){const el=$('#bkState');if(!el)return;const tem=temDados(),ft=refFicheiro(),pend=pendente();
+ el.innerHTML=pend?`<div class="callout warn">${ic('triangle')}<div><b>Some changes are not in the backup file yet.</b> ${AUTO?'Saving them now…':FH&&!PEDIU?'Automatic saving is paused: after the page is reopened, the browser needs your permission again. It asks at your next change on this page; or click <b>Save to project folder</b> now to update bluechip-board-backup.json.':FH?'Automatic saving is off: the browser did not allow access to the backup file on this page. Click <b>Save to project folder</b> to update bluechip-board-backup.json.':'Automatic saving is off on this page. Click <b>Save to project folder</b> to update bluechip-board-backup.json.'}</div></div>`:
   (tem&&isFinite(ft)?`<p class="note">${ic('check')}The backup file has all your data${AUTO?'; while this page is open, changes are saved to it automatically':''}.</p>`:'');}
 /* aviso: o ficheiro gravado neste browser não estava na pasta do projeto quando o script correu depois disso */
 function verificaPasta(){const fw=Date.parse(store.get('fileWrittenAt',null)||''),fs=Date.parse(store.get('fileSaved',null)||''),b=D.backup,tb=b?Date.parse(b.saved||b.exported||''):NaN;
@@ -3924,7 +3956,10 @@ function buildBackup(){const ex=$('#bkExport'),im=$('#bkImport');if(!ex||!im)ret
   .catch(()=>bkMsg('That file is not a Bluechip Board backup.'));im.value='';});
  const msgs=[];const m1=carregaDoFicheiro();if(m1)msgs.push(m1);const m2=verificaPasta();if(m2)msgs.push(m2);
  if(msgs.length)bkMsg(msgs.join(' '));
- else if(window.showSaveFilePicker&&window.indexedDB)idb('readonly',s=>s.get('file')).then(h=>{if(h)bkMsg(`Linked to ${h.name}. After opening the page, click Save to project folder once to keep saving there.`);}).catch(()=>{});
+ ligaFicheiro().then(h=>{if(h&&!msgs.length)bkMsg(AUTO?`Linked to ${h.name}: changes on this page are saved there automatically.`:`Linked to ${h.name}. The browser asks for permission again after the page is reopened: at your first change here, or click Save to project folder.`);});
+ /* sair da página com alterações feitas aqui que ainda não estão no ficheiro: o browser pergunta (os dados ficam no browser,
+    mas o ficheiro é a cópia que resiste a limpar o browser) */
+ addEventListener('beforeunload',e=>{if(ALTEROU&&pendente()){e.preventDefault();e.returnValue='';}});
  drawPf();drawLots();drawBuys();estadoBk();}
 
 /* ---------- sources ---------- */
@@ -4026,7 +4061,7 @@ function init(){guilloche();renderHero();
  if(window.ResizeObserver)new ResizeObserver(()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);}).observe($('#main'));else addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);});renderAll();renderBolsas();setInterval(renderBolsas,30000);setTopbarH();showTab((location.hash||'#overview').slice(1),false);}
 init();
 /* gancho para os testes automáticos (Tests\Test-Site.ps1): só existe se a página de teste o definir antes */
-if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro});
+if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro,c2,pendente,guardaFicheiro,auto:()=>AUTO,setFH:h=>{FH=h;PEDIU=false;}});
 })();
 </script>
 </body>
@@ -4037,6 +4072,14 @@ if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,f
 # ============================================================================
 # 4. EXECUÇÃO
 # ============================================================================
+
+# Sem -EmailSEC, o e-mail da configuração local (nunca nos argumentos da tarefa agendada nem no git)
+$emailLocal = Get-EmailSecLocal $PSScriptRoot
+if (-not $EmailSEC) {
+    $EmailSEC = $emailLocal.email
+    if ($emailLocal.aviso) { Write-Warning $emailLocal.aviso }
+    elseif (-not $EmailSEC -and -not $AgendarDiariamente) { Write-Host '  ! No SEC e-mail (-SecEmail, bluechip-board.config.json or BLUECHIP_SEC_EMAIL): the SEC sources are skipped.' -ForegroundColor DarkYellow }
+}
 
 if ($AgendarDiariamente) {
     $exe = (Get-Process -Id $PID).Path
@@ -4075,14 +4118,6 @@ $brutas = New-Object System.Collections.Generic.List[object]
 foreach ($f in $Feeds) {
     Write-Host "      $($f.Nome)" -ForegroundColor DarkGray
     foreach ($it in (Read-Feed -Feed $f)) { $brutas.Add($it) }
-# Sem -EmailSEC, o e-mail da configuração local (nunca nos argumentos da tarefa agendada nem no git)
-$emailLocal = Get-EmailSecLocal $PSScriptRoot
-if (-not $EmailSEC) {
-    $EmailSEC = $emailLocal.email
-    if ($emailLocal.aviso) { Write-Warning $emailLocal.aviso }
-    elseif (-not $EmailSEC -and -not $AgendarDiariamente) { Write-Host '  ! No SEC e-mail (-SecEmail, bluechip-board.config.json or BLUECHIP_SEC_EMAIL): the SEC sources are skipped.' -ForegroundColor DarkYellow }
-}
-
 }
 if ($EmailSEC) {
     Write-Passo 'Reading SEC filings'
@@ -4174,13 +4209,13 @@ function New-DadosSerie($Ativo, $Serie, [string]$MoedaPadrao) {
 
 Write-Passo 'Getting 1-year prices'
 $ativosDados = @(foreach ($a in $Ativos) {
-    $s = Get-Serie $a
+    $ref = if ($anterior) { @($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0] } else { $null }
+    $s = Get-Serie $a -Referencia $(if ($ref) { @(Get-PontosGuardados $ref.pontos) } else { $null })
     if (-not $s -and $anterior) { $s = Get-SerieAnterior (@($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0].pontos) "Prices: $($a.Nome)" (@($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0]) }
     New-DadosSerie $a $s $a.Moeda
 })
 $mercadoDados = @(foreach ($a in $Mercado) {
-    $ref = if ($anterior) { @($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0] } else { $null }
-    $s = Get-Serie $a -Referencia $(if ($ref) { @(Get-PontosGuardados $ref.pontos) } else { $null })
+    $s = Get-Serie $a
     if (-not $s -and $anterior) { $s = Get-SerieAnterior (@($anterior.mercado | Where-Object { $_.id -eq $a.Id })[0].pontos) "Prices: $($a.Nome)" (@($anterior.mercado | Where-Object { $_.id -eq $a.Id })[0]) }
     New-DadosSerie $a $s ''
 })
@@ -4323,6 +4358,8 @@ if ($transferencias -and (Test-Path -LiteralPath $transferencias)) {
     if ($candidatos.Count) {
         $atual = if (Test-Path -LiteralPath $bkPath) { Read-Backup $bkPath } else { $null }
         $tAtual = if ($atual) { Get-InstanteBackup $atual } else { [DateTimeOffset]::MinValue }
+        # a backup "saved" in the future (a wrong clock) would win every comparison forever: it is never used to decide
+        $futuro = $Script:Agora.AddDays(1)
         foreach ($c in $candidatos) {
             $b = Read-Backup $c.FullName
             if (-not $b) { Write-Warning "$($c.Name) in Downloads is not a valid Bluechip Board backup: it was left there and not used."; continue }
@@ -4340,6 +4377,9 @@ $backup = $null
 if (Test-Path -LiteralPath $bkPath) {
     $backup = Read-Backup $bkPath
     if (-not $backup) { Write-Warning "$bkNome is not a valid Bluechip Board backup and was ignored." }
+    elseif (($tBk = Get-InstanteBackup $backup) -gt $Script:Agora.AddDays(1)) {
+        Write-Warning "$bkNome says it was saved on $($tBk.UtcDateTime.ToString('yyyy-MM-dd HH:mm', $Script:Inv)) UTC, in the future: no backup from Downloads can be newer, so none will be brought in. Check the PC's clock, then save the backup again from the website."
+    }
 }
 
 # Indicadores da área do euro (ECB Data Portal): se falharem, a execução anterior até 30 dias, marcada como tal
@@ -4360,8 +4400,6 @@ foreach ($s in $SeriesMacro) {
     }
     $macro[$s.Id] = $m
 }
-        # a backup "saved" in the future (a wrong clock) would win every comparison forever: it is never used to decide
-        $futuro = $Script:Agora.AddDays(1)
 
 # Manutenção: dados do script que envelhecem e devem ser revistos à mão (aparecem na consola e em Sources & method)
 $manutencao = New-Object System.Collections.Generic.List[string]
@@ -4377,9 +4415,6 @@ foreach ($e in @($ETFs | Where-Object { $_.Id -ne 'SXR8' -and $_.Referencia })) 
     }
 }
 if (-not @($Calendario | Where-Object { $x = [datetime]::MinValue; [datetime]::TryParseExact("$($_.d)", 'yyyy-MM-dd', $Script:Inv, [Globalization.DateTimeStyles]::None, [ref]$x) -and $x -gt $Script:Agora.UtcDateTime.AddDays(30) }).Count) {
-    elseif (($tBk = Get-InstanteBackup $backup) -gt $Script:Agora.AddDays(1)) {
-        Write-Warning "$bkNome says it was saved on $($tBk.UtcDateTime.ToString('yyyy-MM-dd HH:mm', $Script:Inv)) UTC, in the future: no backup from Downloads can be newer, so none will be brought in. Check the PC's clock, then save the backup again from the website."
-    }
     $manutencao.Add('The manual calendar ($Calendario) has no events more than 30 days ahead: add the next Fed meetings and earnings dates.')
 }
 foreach ($b in $Bolsas) {

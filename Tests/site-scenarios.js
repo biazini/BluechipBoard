@@ -90,6 +90,8 @@ const TAXSEED={deleted:{},savedAt:'2026-10-03T10:00:00.000Z',
   {id:'gs2',a:'GOOGL',d:'2026-05-04',q:7,p:160,u:'2026-10-02'},{id:'=x;"q"',a:'SXR8',d:'2026-04-01',q:1,p:650,u:'2026-10-02'},{id:'bs1',a:'BTC',d:'2026-04-01',q:0.6,p:70000}],
  lots:[{id:'L1',d:'2025-03-01',q:0.5,c:15000},{id:'L2',d:'2026-02-01',q:0.3,c:20000}]};
 
+/* backup da versão 1 (sem ids) com duas compras iguais no mesmo dia */
+const V1DUP=()=>({app:'Bluechip Board',version:1,exported:'2026-10-03T15:32:10.177Z',lots:[],etfLots:[{d:'2026-09-01',q:1,p:700},{d:'2026-09-01',q:1,p:700},{d:'2026-09-02',q:2,p:710}]});
 const SC={
  newuser:{test(api){
   ok('price cards: the five original assets, the three new ETFs and EUR/USD last',[...document.querySelectorAll('.tk')].map(t=>t.dataset.tk).join(',')==='AAPL,NVDA,GOOGL,SXR8,EUNK,IS3N,EUNN,BTC,FX',[...document.querySelectorAll('.tk')].map(t=>t.dataset.tk).join(','));
@@ -953,6 +955,65 @@ const SC={
   api.escolheEtf('EUNK');
   ok('malformed ETF data: EUNK view shows unavailable holdings, no error',/Unavailable/.test(txt('#top10Sub'))&&txt('#h-etf')==='iShares Core MSCI Europe');}},
 
+ /* ---------- remediação de 7 out 2026 ---------- */
+ /* H4g: a pasta escolhida é confirmada logo (tem de ter o bluechip-board.html); uma pasta errada é recusada sem gravar nada */
+ bkfolder:{wait:1000,prep(){seed({buys:[{id:'f1',a:'AAPL',d:'2026-09-01',q:1,p:200}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(api){
+  const W=G.escrito=[];window.showSaveFilePicker=async()=>{throw new Error('the file picker should not be used');};
+  /* IndexedDB em memória: o verdadeiro corre fora do tempo virtual do browser de teste (e não guarda objetos de teste) */
+  const mem={};Object.defineProperty(window,'indexedDB',{configurable:true,value:{open:()=>{const q={};setTimeout(()=>{q.result={transaction:()=>{const tx={objectStore:()=>({get:k=>({result:mem[k]}),put:(v,k)=>{mem[k]=v;return{};}})};setTimeout(()=>tx.oncomplete&&tx.oncomplete(),0);return tx;},close(){}};if(q.onsuccess)q.onsuccess();},0);return q;}}});
+  const ficheiro=n=>({kind:'file',name:n,queryPermission:async()=>'granted',requestPermission:async()=>'granted',createWritable:async()=>({write:async t=>{W.push(t);},close:async()=>{}})});
+  const pasta=(n,tem)=>({kind:'directory',name:n,getFileHandle:async x=>{if(x==='bluechip-board.html'&&!tem)throw new DOMException('not found','NotFoundError');return ficheiro(x);}});
+  window.showDirectoryPicker=async()=>pasta('Downloads',false);
+  api.guardaFicheiro(true).then(()=>{G.msg1=txt('#bkMsg');G.n1=W.length;G.auto1=api.auto();
+   window.showDirectoryPicker=async()=>pasta('BluechipBoard',true);return api.guardaFicheiro(true);}).then(()=>{G.msg2=txt('#bkMsg');G.auto2=api.auto();G.pend=api.pendente();}).catch(e=>{G.err=String(e);});},
+  after(){ok('wrong folder (no bluechip-board.html in it): refused at once with a clear message, nothing saved',/has no bluechip-board\.html/.test(G.msg1||'')&&G.n1===0&&G.auto1===false,G.err||G.msg1);
+   const b=G.escrito.length?JSON.parse(G.escrito[0]):null;
+   ok('project folder: the backup is written there, automatic saving on, nothing left pending',G.escrito.length===1&&b&&b.app==='Bluechip Board'&&b.buys.length===1&&/Saved to bluechip-board-backup\.json/.test(G.msg2||'')&&G.auto2===true&&G.pend===false,JSON.stringify({m:G.msg2,a:G.auto2,p:G.pend,n:G.escrito.length,e:G.err,bk:txt('#bkMsg')}));}},
+ /* H4a: depois de reabrir, a primeira alteração (um gesto do utilizador) pede logo a autorização do ficheiro ligado */
+ bkperm:{wait:3000,prep(){seed({buys:[{id:'p1',a:'AAPL',d:'2026-09-01',q:1,p:200}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z',fileSaved:'2026-10-03T10:00:00.000Z'});},test(api){
+  let perm='prompt';const W=G.escrito=[];G.pedidos=0;
+  api.setFH({kind:'file',name:'bluechip-board-backup.json',queryPermission:async()=>perm,requestPermission:async()=>{G.pedidos++;perm='granted';return'granted';},createWritable:async()=>({write:async t=>{W.push(t);},close:async()=>{}})});
+  G.estado0=txt('#bkState');
+  api.store.set('notes',{p1:{t:'why I bought it',at:new Date().toISOString()}});G.auto0=api.auto();
+  setTimeout(()=>{G.auto1=api.auto();G.n1=W.length;api.store.set('notes',{p1:{t:'second change',at:new Date().toISOString()}});},300);
+  setTimeout(()=>{G.n2=W.length;G.pend=api.pendente();G.estado2=txt('#bkState');},2500);},
+  after(){ok('linked file and no pending change: no warning box before the first change',!/not in the backup file/.test(G.estado0),G.estado0);
+   ok('first change after reopening: the browser is asked for permission once, then the change is saved to the file',G.pedidos===1&&G.auto1===true&&G.n1>=1&&JSON.parse(G.escrito[0]).notes.p1.t==='why I bought it',JSON.stringify({p:G.pedidos,a:G.auto1,n:G.n1}));
+   ok('later changes are saved automatically, without asking again',G.pedidos===1&&G.n2>G.n1&&G.pend===false&&!/not in the backup file/.test(G.estado2),JSON.stringify({p:G.pedidos,n1:G.n1,n2:G.n2,pend:G.pend}));}},
+ bkpermno:{wait:2500,prep(){seed({buys:[{id:'p1',a:'AAPL',d:'2026-09-01',q:1,p:200}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z',fileSaved:'2026-10-03T10:00:00.000Z'});},test(api){
+  G.pedidos=0;api.setFH({kind:'file',name:'bluechip-board-backup.json',queryPermission:async()=>'prompt',requestPermission:async()=>{G.pedidos++;return'denied';},createWritable:async()=>{throw new Error('no write without permission');}});
+  api.store.set('notes',{p1:{t:'x',at:new Date().toISOString()}});setTimeout(()=>{api.store.set('notes',{p1:{t:'y',at:new Date().toISOString()}});},300);setTimeout(()=>{G.estado=txt('#bkState');G.auto=api.auto();},2000);},
+  after(){ok('permission refused: asked only once on this page, automatic saving stays off and the box says what to do',G.pedidos===1&&G.auto===false&&/not in the backup file yet/.test(G.estado)&&/next change on this page|Save to project folder/.test(G.estado),JSON.stringify({p:G.pedidos})+' '+G.estado);}},
+ /* backup malformado: só números verdadeiros (true, null, '' e [5] não passam a 1, 0, 0 e 5) */
+ bkstrict:{test(api){const F=api.limpaBackup({app:'Bluechip Board',version:4,saved:'2026-10-01T00:00:00.000Z',deleted:{},sales:[],
+   buys:[{id:'b1',a:'AAPL',d:'2025-01-02',q:[2],p:100},{id:'b2',a:'AAPL',d:'2025-01-02',q:true,p:100},{id:'b3',a:'AAPL',d:'2025-01-02',q:1,p:''},{id:'b4',a:'AAPL',d:'2025-01-02',q:'1.5',p:'200.25'}],
+   lots:[{id:'l1',d:'2025-01-01',q:0.1,c:null},{id:'l2',d:'2025-01-01',q:0.1},{id:'l3',d:'2025-01-01',q:0.2,c:'3000'},{id:'l4',d:'2025-01-01',q:0.3,c:0}]});
+  ok('malformed backup: quantities and prices that are not numbers are refused (arrays, booleans, empty text)',F.buys.map(x=>x.id).join(',')==='b4'&&F.buys[0].q===1.5&&F.buys[0].p===200.25,JSON.stringify(F.buys));
+  ok('malformed backup: a Bitcoin purchase with a missing or null cost is refused (never a cost of €0); an explicit 0 is kept',F.lots.map(x=>x.id).join(',')==='l3,l4'&&F.lots[0].c===3000&&F.lots[1].c===0,JSON.stringify(F.lots));}},
+ /* versão 1 sem ids: duas compras iguais no mesmo dia são duas, e juntar o mesmo ficheiro outra vez não duplica nada */
+ v1dup:{prep(d){d.backup=V1DUP();},test(api){
+  const b=get('buys')||[];
+  ok('version-1 backup with two identical purchases (no ids): both kept, each with its own stable id',b.length===3&&new Set(b.map(x=>x.id)).size===3&&txt('#pf-q-SXR8')==='4',JSON.stringify(b.map(x=>x.id))+' '+txt('#pf-q-SXR8'));
+  const r=api.juntaBackup(V1DUP(),false);
+  ok('merging the same version-1 file again adds nothing',r.novos===0&&(get('buys')||[]).length===3,JSON.stringify(r));}},
+ /* arredondamento aos cêntimos sobre o valor decimal (1.005 € → 1.01 €, não 1.00 €) */
+ taxround:{prep(){seed({buys:[{id:'r1',a:'AAPL',d:'2025-01-02',q:1,p:10.005}],lots:[],sales:[{id:'r2',a:'AAPL',d:'2026-03-02',q:1,p:20.005}],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(api){
+  ok('rounding to cents: 1.005 → 1.01, 2.675 → 2.68, −1.005 → −1.01, 0.125 → 0.13 (half away from zero on the decimal value)',api.c2(1.005)===1.01&&api.c2(2.675)===2.68&&api.c2(-1.005)===-1.01&&api.c2(0.125)===0.13&&api.c2(10)===10&&api.c2(null)===null,[api.c2(1.005),api.c2(2.675),api.c2(-1.005),api.c2(0.125)].join(' '));
+  const X=api.anexoJ(2026),r=X.acoes[0];
+  ok('Anexo J: €10.005 and €20.005 entered give €10.01 and €20.01 (not €10.00 and €20.00), gain €10.00',r&&r.aq===10.01&&r.vd===20.01&&r.ganho===10,JSON.stringify(r&&[r.aq,r.vd,r.ganho]));}},
+ /* preços atrasados: o alerta de movimento diz de quando é, e o "Latest daily move" da carteira não o soma como de hoje */
+ stalemove:{prep(d){const a=d.ativos.find(x=>x.id==='NVDA'),P=a.pontos.map(pair).slice(0,-8);P[P.length-1]=[P[P.length-1][0],+(P[P.length-2][1]*1.07).toFixed(4)];a.pontos=P;a.parcial=false;a.fonte='Yahoo Finance';G.nvdaIso=P[P.length-1][0];
+   seed({buys:[{id:'s1',a:'NVDA',d:'2026-01-05',q:2,p:150},{id:'s2',a:'SXR8',d:'2026-01-05',q:1,p:600}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(api){
+  const al=api.alerts().filter(x=>x.co==='NVDA'&&/rose|fell/.test(x.txt));
+  ok('stale prices: the daily-move alert says the date of that move ("not today") instead of "in the last session"',al.length===1&&al[0].txt.includes('(the latest price available, not today)')&&/the news of that day/.test(al[0].txt)&&!/today's news/.test(al[0].txt),al.map(x=>x.txt).join(' | '));
+  const R=api.pfDados(),nv=R.find(x=>x.id==='NVDA'),sx=R.find(x=>x.id==='SXR8');
+  ok('portfolio: the latest daily move leaves out the asset whose price is not current, and names it',nv.velho===true&&sx.velho===false&&/without NVIDIA \(price not current\)/.test(txt('#pfKpis')),txt('#pfKpis'));}},
+ /* reação aos resultados: um preço intradiário (sessão aberta) não conta como fecho da sessão de reação */
+ earnpartial:{prep(d){const a=d.ativos.find(x=>x.id==='AAPL'),H=d.historico.AAPL.map(pair),L=H[H.length-1][0],E=H[H.length-10][0];a.parcial=true;a.hora=d.geradoEm;
+   const P=a.pontos.map(pair);if(P[P.length-1][0]!==L)P.push([L,H[H.length-1][1]]);a.pontos=P;G.L=L;G.E=E;
+   d.resultadosSec={AAPL:{id:'AAPL',estado:'ok',fonte:'SEC EDGAR',obtidoEm:d.geradoEm,resultados:[{acc:'x1',entrega:L,aceite:L+'T12:00:00Z',horaNY:L+' 08:00',quando:'before',sessao:L,nota:''},{acc:'x2',entrega:E,aceite:E+'T12:00:00Z',horaNY:E+' 08:00',quando:'before',sessao:E,nota:''}],ultimoRelatorio:null,erro:'',nota:''}};},test(api){
+  const E=api.reacoes('AAPL');
+  ok('earnings reaction on a session still open (intraday price): not counted as a reaction; the earlier one is',E.ok&&E.C.length===1&&E.C[0].x.acc==='x2'&&E.sem===1,JSON.stringify({n:E.C.length,sem:E.sem}));}},
  corrupt:{raw:'{"geradoEm": broken',after(){ok('unreadable data: the page says so instead of going blank',/could not be read/.test(txt('#main .callout')),txt('#main .callout'));}}
 };
 const sc=SC[S];
@@ -961,5 +1022,5 @@ else if(sc.raw!=null)el.textContent=sc.raw;
 else{let d=JSON.parse(el.textContent);if(sc.prep)sc.prep(d);el.textContent=JSON.stringify(d);}
 window.__BB_TEST__=api=>{try{if(sc&&sc.test)sc.test(api);}catch(e){ok('exception: '+e.message,false,e.stack);}};
 addEventListener('load',()=>setTimeout(()=>{try{if(sc&&sc.after)sc.after();}catch(e){ok('exception: '+e.message,false);}
- const p=document.createElement('pre');p.id='__res';p.textContent=JSON.stringify({s:S,errs:window.__errs,r:window.__R,out:window.__OUT||null});document.body.appendChild(p);},400));
+ const p=document.createElement('pre');p.id='__res';p.textContent=JSON.stringify({s:S,errs:window.__errs,r:window.__R,out:window.__OUT||null});document.body.appendChild(p);},sc&&sc.wait||400));   /* wait: cenários com gravações assíncronas (backup) */
 })();
