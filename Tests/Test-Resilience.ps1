@@ -289,6 +289,22 @@ try {
     $htmlP1 = [IO.File]::ReadAllText("$p1\bluechip-board.html"); $arqP1 = @(Get-ChildItem "$p1\Archive" -Filter 'bluechip-board-2*.html')[0]
     Check 'the main website carries the live port; the Archive copy and the data file do not' ($htmlP1.Contains("`"vivo`":{`"porta`":$portaTeste}") -and $arqP1 -and -not ([IO.File]::ReadAllText($arqP1.FullName)).Contains('"vivo":') -and -not ([IO.File]::ReadAllText("$p1\bluechip-board-data.json")).Contains('"vivo":'))
 
+    Write-Host 'Desktop shortcut (Install-Shortcut.ps1, into a test folder: the real desktop is never touched)'
+    $lnkDir = Join-Path $base 'desktop'
+    $ErrorActionPreference = 'Continue'
+    $o = & $Shell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $raiz 'Install-Shortcut.ps1') -Destino $lnkDir 2>&1 | Out-String
+    $ErrorActionPreference = 'Stop'
+    $lnk = Join-Path $lnkDir 'Bluechip Board.lnk'
+    $sc = if (Test-Path -LiteralPath $lnk) { (New-Object -ComObject WScript.Shell).CreateShortcut($lnk) } else { $null }
+    $pwshExe = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    Check 'shortcut created: runs the launcher of this folder, from this folder, with the icon' ($sc -and $sc.Arguments -eq "-ExecutionPolicy Bypass -File `"$(Join-Path $raiz 'Start-BluechipBoard.ps1')`"" -and $sc.WorkingDirectory -eq $raiz -and $sc.IconLocation -like "*Bluechip-Board.ico,0") $o
+    Check 'shortcut: PowerShell 7 when installed, otherwise Windows PowerShell 5.1' ($sc -and $(if ($pwshExe) { $sc.TargetPath -eq $pwshExe.Source } else { $sc.TargetPath -like '*\WindowsPowerShell\v1.0\powershell.exe' })) $(if ($sc) { $sc.TargetPath })
+    $ErrorActionPreference = 'Continue'
+    $o = & $Shell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $raiz 'Install-Shortcut.ps1') -Destino $lnkDir -Shell powershell 2>&1 | Out-String
+    $ErrorActionPreference = 'Stop'
+    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
+    Check 'shortcut: -Shell powershell updates the same shortcut to Windows PowerShell 5.1' ($sc.TargetPath -like '*\WindowsPowerShell\v1.0\powershell.exe' -and @(Get-ChildItem $lnkDir -Filter '*.lnk').Count -eq 1) $o
+
     Write-Host 'SEC e-mail from the local configuration (as the scheduled task and the launcher use it)'
     # bluechip-board.config.json ao lado da cópia do script: a execução sem -SecEmail usa as fontes da SEC (aqui bloqueadas)
     [IO.File]::WriteAllText((Join-Path $base 'bluechip-board.config.json'), '{ "secEmail": "cfg@example.com" }')
