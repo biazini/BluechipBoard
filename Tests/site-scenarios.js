@@ -1012,6 +1012,13 @@ const SC={
    seed({buys:[{id:'s1',a:'NVDA',d:'2026-01-05',q:2,p:150}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(){
   const k=[...document.querySelectorAll('#pfKpis .kpi')].find(x=>/Latest daily move/.test(x.textContent));
   ok('portfolio with no current price at all: the latest daily move is "—" (not €0)',k&&k.querySelector('.v').textContent.trim()==='—'&&/without NVIDIA/.test(k.textContent),k&&k.textContent);}},
+ /* B14: uma venda antiga sem compras (de outro ativo) não impede uma venda nova válida; uma venda sem unidades continua recusada */
+ sellother:{prep(){seed({buys:[{id:'o1',a:'SXR8',d:'2026-01-05',q:2,p:600}],lots:[],sales:[{id:'o2',a:'NVDA',d:'2025-06-02',q:3,p:150}],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(){
+  const vende=q=>{$('#buyAsset').value='SXR8';$('#buyType').value='sell';$('#buyDate').value='2026-09-01';$('#buyQty').value=String(q);$('#buyPrice').value='700';$('#buyForm').dispatchEvent(new Event('submit',{cancelable:true}));return txt('#buyMsg');};
+  const m1=vende(1),n1=(get('sales')||[]).length;
+  ok('an old sale without purchases (NVDA) no longer blocks a valid new sale of another asset (SXR8)',/^Sale saved/.test(m1)&&n1===2,m1);
+  const m2=vende(5),n2=(get('sales')||[]).length;
+  ok('a sale larger than what is held is still refused, and nothing is saved',/did not hold enough/.test(m2)&&n2===2,m2);}},
  /* reação aos resultados: um preço intradiário (sessão aberta) não conta como fecho da sessão de reação */
  earnpartial:{prep(d){const a=d.ativos.find(x=>x.id==='AAPL'),H=d.historico.AAPL.map(pair),L=H[H.length-1][0],E=H[H.length-10][0];a.parcial=true;a.hora=d.geradoEm;
    const P=a.pontos.map(pair);if(P[P.length-1][0]!==L)P.push([L,H[H.length-1][1]]);a.pontos=P;G.L=L;G.E=E;

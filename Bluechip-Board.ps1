@@ -2703,6 +2703,8 @@ const GEN=Date.parse(D.geradoEm)||Date.now(),DAY=864e5;
 const MES=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],WD=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 /* datas e horas sempre na hora de Lisboa, seja qual for o fuso do computador */
 const LIS='Europe/Lisbon';
+/* tzParts: um formatador por fuso, criado uma vez (criá-lo custa ~0,1 ms e a página formata milhares de datas ao abrir) */
+const TZF={};
 const fdt=t=>{if(t==null||!isFinite(t))return'—';const p=tzParts(t,LIS);return(+p.day)+' '+MES[+p.month-1]+' '+p.year;};  /* data inválida (ex.: 2026-13-45 num backup antigo): '—' em vez de parar a página */
 const ic=(n,c)=>`<svg class="i${c?' '+c:''}" aria-hidden="true" focusable="false"><use href="#i-${n}"/></svg>`;
 const CO={AAPL:{n:'Apple',c:'var(--aapl)',i:'apple'},NVDA:{n:'NVIDIA',c:'var(--nvda)',i:'cpu'},GOOGL:{n:'Alphabet',c:'var(--googl)',i:'search'},SXR8:{n:'ETF SXR8',c:'var(--spx)',i:'pie'},EUNK:{n:'ETF EUNK',c:'var(--eunk)',i:'pie'},IS3N:{n:'ETF IS3N',c:'var(--is3n)',i:'pie'},EUNN:{n:'ETF EUNN',c:'var(--eunn)',i:'pie'},BTC:{n:'Bitcoin',c:'var(--btc)',i:'bitcoin'},MKT:{n:'Market & macro',c:'var(--macro)',i:'landmark'},GSPC:{n:'S&P 500',c:'var(--macro)',i:'landmark'},TU:{n:'You',c:'var(--muted)',i:'user'}};
@@ -3413,7 +3415,9 @@ function buildBuys(){const f=$('#buyForm');if(!f)return;const sel=$('#buyAsset')
   if(Date.parse(d+'T00:00:00Z')>hojeL()){msg.textContent=`The ${v?'sale':'purchase'} date cannot be in the future.`;return;}
   /* base para os desdobramentos: o preço desse dia no histórico desta página e a data da base desse histórico */
   const h=HIST[a]||[],pt=a!=='BTC'?precoEm(h,d):null,base=a==='BTC'?{}:Object.assign({u:h.length?isoU(h[h.length-1][0]):isoU(GEN)},pt?{r:[isoU(pt[0]),pt[1]]}:{});
-  if(v){const nova=Object.assign({id:novoId(),a,d,q,p},base),C=carteira(nova),mal=C.vendas.find(x=>x.falta>0);
+  /* recusa só o que esta venda estraga: a própria sem unidades, ou uma venda que passe a ter falta (ou mais falta) do que
+     tinha. Uma venda antiga já sem compras (dados antigos ou restaurados, de qualquer ativo) não impede as outras (B14) */
+  if(v){const f0={};carteira().vendas.forEach(x=>{f0[x.id]=x.falta;});const nova=Object.assign({id:novoId(),a,d,q,p},base),C=carteira(nova),mal=C.vendas.find(x=>x.falta>(f0[x.id]||0)+1e-9);
    if(mal){const tem=arr(C.lotes[a]).filter(x=>x.d<=d).reduce((s,x)=>s+x.q0,0);msg.textContent=mal.id===nova.id?`You did not hold enough ${nomePF(a)} on ${fdt(Date.parse(d+'T00:00:00Z'))} for this sale (purchases up to that day: ${btcF(tem)}, minus earlier sales). Record the purchase first.`:'This sale would leave a later sale without enough units to sell. Check the dates.';return;}
    const L=arr(store.get('sales',[]));L.push(nova);if(!store.set('sales',L)){msg.textContent='Could not save: this browser is blocking local storage.';return;}guardaFeeForm(nova.id);
    msg.textContent=`Sale saved: ${btcF(q)} × ${nomePF(a)} on ${fdt(Date.parse(d+'T00:00:00Z'))} at ${eur(p,2)} each. It uses up your oldest purchases first.`;}
@@ -4017,7 +4021,7 @@ function renderSrc(){const F=arr(D.fontes).slice().sort((a,b)=>(/^ok/.test(a.est
  const M=arr(D.manutencao);$('#manut').innerHTML=M.length?`<div class="callout warn">${ic('refresh')}<div><b>Maintenance:</b> ${M.map(esc).join(' ')}</div></div>`:'';}
 
 /* ---------- horário das bolsas, em hora de Lisboa ---------- */
-function tzParts(t,tz){const o={};new Intl.DateTimeFormat('en-GB',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(t)).forEach(p=>o[p.type]=p.value);return o;}
+function tzParts(t,tz){const o={},f=TZF[tz]||(TZF[tz]=new Intl.DateTimeFormat('en-GB',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}));f.formatToParts(new Date(t)).forEach(p=>o[p.type]=p.value);return o;}
 function tzOffset(t,tz){const p=tzParts(t,tz);return Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second)-Math.floor(t/1000)*1000;}
 /* hora "de parede" numa bolsa (ex.: 09:30 em Nova Iorque) convertida para um instante real */
 function zoned(y,m,d,hhmm,tz){const q=hhmm.split(':').map(Number),g=Date.UTC(y,m-1,d,q[0],q[1]);let u=g-tzOffset(g,tz);u=g-tzOffset(u,tz);return u;}
