@@ -6,7 +6,7 @@ Record of the fixes made after the technical audit of Bluechip Board, carried ou
 
 **How to read this file.** The **[follow-up of 7 Oct 2026](#post-remediation-follow-up--7-oct-2026)** (at the end) re-checked every finding below, fixed what could be fixed and records the decisions; the rows of Open items it changed carry a "7 Oct 2026" note. Start with **[Open items](#open-items--6-oct-2026)**: everything still to decide, fix or watch, in one place. The audit sections (Critical to Testing gap) record the state on 4 Oct 2026 and are kept as they were written. Later work is in the dated change logs at the end. The [status review](#status-review--5-oct-2026) says which audit findings still applied on 5 Oct.
 
-**Current test counts (7 Oct 2026):** engine 251, site 436, resilience 62, all passing on Windows PowerShell 5.1 and PowerShell 7 (6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
+**Current test counts (7 Oct 2026, with live prices):** engine 278, site 462, resilience 73, all passing on Windows PowerShell 5.1 and PowerShell 7 (after the remediation: 251, 436, 62; 6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
 
 **Test suites at the end of the remediation** (all in `Tests\`, see the README):
 
@@ -1005,3 +1005,55 @@ A second, deep pass over the whole project: every finding above re-checked again
 | Privacy | — | the SEC e-mail is in no output, log or commit; no personal file is tracked by git |
 
 New regression tests: engine +39, site +20 (12 scenarios), resilience +6.
+
+## Change log · 7 Oct 2026 · Live prices while the page is open
+
+**Request.** When the board is opened from the desktop shortcut, keep the prices up to date minute by minute while the page is open, and stop the background work when the page is closed.
+
+**What was built.**
+
+| Part | Change |
+|---|---|
+| Script | `-Live` (`-AoVivo`): instead of a run, a process that serves the latest prices on `127.0.0.1:47821` only (`$Vivo` in the configuration). One Yahoo "spark" request a minute brings all 12 symbols (assets, S&P 500, VIX, 10-year yield, EUR/USD), only while a page is open. The quotes are read with the rules of `Get-Serie` (`Get-DiaBolsa`, sharing `$FusosBolsa`): exchange day, partial while the session is open, and a symbol with a wrong currency, an invalid price or a future time left out and named. |
+| Launcher | After a run without errors, starts `Bluechip-Board.ps1 -Live` hidden. A live process from an earlier click is asked to quit (`/ping`, then `/quit`) and replaced. |
+| Website | `D.vivo.porta` (only in `bluechip-board.html`, never in the Archive copies or the data file). The page asks for `/quotes` every minute (every 5 s while connecting). Each quote is added to its series or replaces that day's point. Then the snapshot, alerts, portfolio, purchase lists and the open price tab are redrawn. A status line in the header shows the state. On `pagehide` it sends `/bye`. |
+| Ending | The process ends 20 s after the last page says goodbye (a reload comes back within that time), after 5 minutes without any request (the browser closed without a goodbye), on `/quit` from this computer, or when replaced. A sleep of the PC does not count as silence. |
+
+**Safeguards.**
+
+- **Local only.** The listener is bound to the loopback address, with exclusive use of the port.
+- **Request checks.** A request is refused unless:
+  - its `Host` is `127.0.0.1` or `localhost` on that port (no DNS rebinding);
+  - it carries no `Origin` (a program on this computer) or `Origin: null` (the board opened from the disk). Any other website is refused.
+- **`/quit`.** Accepted only without an `Origin`: never from a browser.
+- **What the process gives.** It serves public prices only: no personal data, no file access.
+- **What the page accepts.** It does not use a quote that is:
+  - more than 50 % away from the previous close;
+  - in another currency;
+  - from an earlier day;
+  - more than 6 days after the end of the series.
+- **Freshness.** It is counted from the latest live update (`T_PRECOS`), so an asset the updates no longer reach is shown as behind.
+- **Bitcoin.** The CoinGecko 24 h change and USD price (from the run) are dropped once Bitcoin is live, because they would no longer match.
+- **Nothing saved.** Nothing is written to `localStorage` or to a file. The next run collects everything again.
+- **Bitcoin indicator label (found while doing this).** Without CoinGecko's 24-hour change, the Bitcoin section labelled the change since 00:00 UTC as "24 hours". It is now labelled "Today (UTC)", as the snapshot card already did.
+
+**Checked.**
+
+- **Chrome 154.** A `file://` page's `fetch` and `sendBeacon` to `127.0.0.1` arrive with `Origin: null`, without a permission prompt.
+- **Real run of `-Live`.** It served the 12 quotes with their exchange days and correct partial flags (Xetra and Bitcoin open, the US closed). It refused another origin, another host and a browser `/quit`, and ended 3.4 s after `/bye` (grace period shortened for the test).
+
+**New tests.**
+
+- **Engine (+27):** the spark reader, the request decisions and static checks.
+- **Site (+26):** scenarios `live`, `livestale` and `nolive`, plus one check in `btcnull`.
+- **Resilience (+11):** the real process on a test port with a canned Yahoo answer.
+
+All pass on Windows PowerShell 5.1 and PowerShell 7.
+
+**Risks.**
+
+| ID | Risk | What to do |
+|---|---|---|
+| R13 | The Yahoo spark endpoint is unofficial and could change or require authentication, as `quote` did in 2023 | The page then says *the source is not answering* and keeps the latest prices with their time; the daily run is unaffected (it uses the chart endpoint). |
+| R14 | Another program could take port 47821 | The process does not start and the launcher window shows the warning; change `Porta` in `$Vivo`. |
+| R15 | A browser could freeze a background tab for more than 5 minutes | The process then ends (as if the page had closed); the page says *Live prices stopped* and the shortcut restarts it. |

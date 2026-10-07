@@ -836,6 +836,72 @@ $Script:Ficheiros['251861'] = (iShares 'IE00B4K48X80' $linhasEU).Replace('>Marke
 $r = Get-PesosETF $eunk
 Check 'iShares file without the Market Currency column: weights still read, the source row names the missing column and the Unavailable breakdown' ($r.aoVivo -and $Script:Fontes[-1].estado -eq 'ok' -and $Script:Fontes[-1].erro -match 'no column Market Currency' -and $Script:Fontes[-1].erro -match 'currency breakdown Unavailable') $Script:Fontes[-1].erro
 
+Write-Host 'Live prices (-Live)'
+# resposta "spark" de teste: um símbolo com a sua sessão normal de hoje (início e fim)
+function SparkSim([string]$Sim, [string]$Moeda, $Preco, [DateTimeOffset]$Hora, [string]$Tz, [int]$Gmt, [DateTimeOffset]$Ini, [DateTimeOffset]$Fim) {
+    [ordered]@{ symbol = $Sim; response = @(@{ meta = [ordered]@{ symbol = $Sim; currency = $Moeda; regularMarketPrice = $Preco; regularMarketTime = $Hora.ToUnixTimeSeconds(); exchangeTimezoneName = $Tz; gmtoffset = $Gmt; currentTradingPeriod = @{ regular = @{ start = $Ini.ToUnixTimeSeconds(); end = $Fim.ToUnixTimeSeconds() } } } }) }
+}
+$U = { param($s) [DateTimeOffset]::Parse($s, $Script:Inv) }
+$agV = & $U '2026-10-07T15:00:00Z'
+$nyI = & $U '2026-10-07T13:30:00Z'; $nyF = & $U '2026-10-07T20:00:00Z'; $deI = & $U '2026-10-07T07:00:00Z'; $deF = & $U '2026-10-07T15:30:00Z'
+$resV = @(
+    (SparkSim 'AAPL' 'USD' 340.5 (& $U '2026-10-07T14:59:00Z') 'America/New_York' -14400 $nyI $nyF),
+    (SparkSim 'NVDA' 'EUR' 190 (& $U '2026-10-07T14:59:00Z') 'America/New_York' -14400 $nyI $nyF),
+    (SparkSim 'GOOGL' 'USD' 0 (& $U '2026-10-07T14:59:00Z') 'America/New_York' -14400 $nyI $nyF),
+    (SparkSim 'SXR8.DE' 'EUR' 760 (& $U '2026-10-06T15:35:00Z') 'Europe/Berlin' 7200 $deI $deF),
+    (SparkSim 'EUNK.DE' 'EUR' 103 (& $U '2026-10-07T16:00:00Z') 'Europe/Berlin' 7200 $deI $deF),
+    (SparkSim 'EUNN.DE' 'EUR' 76 (& $U '2026-10-07T14:58:00Z') 'Europe/Berlin' 7200 $deI $deF),
+    (SparkSim 'BTC-EUR' 'EUR' 75000 (& $U '2026-10-06T23:59:00Z') 'UTC' 0 (& $U '2026-10-06T00:00:00Z') (& $U '2026-10-06T23:59:59Z')),
+    (SparkSim 'EURUSD=X' 'USD' 1.12 (& $U '2026-10-07T14:59:00Z') 'Europe/London' 3600 (& $U '2026-10-06T23:00:00Z') (& $U '2026-10-07T22:00:00Z')),
+    (SparkSim '^GSPC' 'USD' 7800 (& $U '2026-10-07T02:00:00Z') 'America/New_York' -14400 $nyI $nyF),
+    (SparkSim 'TSLA' 'USD' 400 (& $U '2026-10-07T14:59:00Z') 'America/New_York' -14400 $nyI $nyF)
+)
+$simV = Get-SimbolosVivo
+Check 'live symbols: every asset, every market indicator and EUR/USD (id FX), each with its currency' ($simV.Count -eq (@($Ativos).Count + @($Mercado).Count + 1) -and $simV['EURUSD=X'].Id -eq 'FX' -and $simV['AAPL'].Moeda -eq 'USD' -and $simV['SXR8.DE'].Id -eq 'SXR8' -and $simV['^VIX'].Id -eq 'VIX')
+$rV = ConvertFrom-SparkVivo (@{ spark = @{ result = $resV; error = $null } } | ConvertTo-Json -Depth 10) $simV $agV
+$c = $rV.cotacoes; $ig = @($rV.ignorados) -join ' | '
+Check 'live: a session still open gives a partial price on the exchange day, with its UTC time' ($c['AAPL'].preco -eq 340.5 -and $c['AAPL'].parcial -eq $true -and $c['AAPL'].dia -eq '2026-10-07' -and $c['AAPL'].hora -eq '2026-10-07T14:59:00Z' -and $c['AAPL'].moeda -eq 'USD') ($c['AAPL'] | ConvertTo-Json -Compress)
+Check 'live: before the first trade of the day, the price is the previous close (not partial, previous day)' ($c['SXR8'].parcial -eq $false -and $c['SXR8'].dia -eq '2026-10-06') ($c['SXR8'] | ConvertTo-Json -Compress)
+Check 'live: Xetra in the session, Berlin day' ($c['EUNN'].parcial -eq $true -and $c['EUNN'].dia -eq '2026-10-07')
+Check 'live: Bitcoin counts in UTC days (23:59 UTC is still 6 Oct, though 00:59 in Lisbon)' ($c['BTC'].dia -eq '2026-10-06' -and $c['BTC'].parcial -eq $false)
+Check 'live: the S&P 500 at 22:00 New York time counts on that New York day' ($c['GSPC'].dia -eq '2026-10-06')
+Check 'live: EUR/USD under the id FX' ($c['FX'].preco -eq 1.12 -and $c['FX'].dia -eq '2026-10-07')
+Check 'live: unexpected currency, zero price and a time in the future are left out and named' (-not $c.Contains('NVDA') -and -not $c.Contains('GOOGL') -and -not $c.Contains('EUNK') -and $ig -match 'NVDA: currency EUR' -and $ig -match 'GOOGL: invalid price' -and $ig -match 'EUNK: time in the future') $ig
+Check 'live: a symbol missing from the answer is named (never invented); one not asked for is ignored' ($ig -match 'IS3N: no data' -and $ig -match 'VIX: no data' -and $ig -match 'TNX: no data' -and -not $c.Contains('TSLA')) $ig
+$thr = $false; try { ConvertFrom-SparkVivo '{"spark":{"result":null,"error":{"code":"Bad","description":"bad request"}}}' $simV $agV | Out-Null } catch { $thr = $_.Exception.Message -match 'bad request' }
+Check 'live: a Yahoo error is an error, not empty prices' $thr
+$thr = $false; try { ConvertFrom-SparkVivo '<html>blocked</html>' $simV $agV | Out-Null } catch { $thr = $true }
+Check 'live: a web page instead of JSON is an error' $thr
+Check 'exchange day: 22:30 UTC on 6 Oct is already 7 Oct in Berlin; an unknown zone uses the offset Yahoo gives' ((Get-DiaBolsa ([pscustomobject]@{ exchangeTimezoneName = 'Europe/Berlin'; gmtoffset = 7200 }) (& $U '2026-10-06T22:30:00Z')) -eq '2026-10-07' -and (Get-DiaBolsa ([pscustomobject]@{ exchangeTimezoneName = 'Asia/Nowhere'; gmtoffset = -14400 }) (& $U '2026-10-07T02:00:00Z')) -eq '2026-10-06')
+
+# pedidos HTTP ao processo (sem rede: só a decisão)
+$P = 47821; $t0 = [datetime]'2026-10-07T15:00:00'
+$est = @{ clientes = @{}; visto = $t0.AddMinutes(-10); adeus = $null; sair = $false; json = '{"versao":1}' }
+$okC = @{ host = "127.0.0.1:$P"; origin = 'null' }
+$r = Get-RespostaVivo 'GET' '/quotes?c=pagina0001' $okC $est $P $t0
+Check 'live server: the board opened from the disk (Origin null) gets the prices and is registered' ($r.codigo -eq 200 -and $r.corpo -eq '{"versao":1}' -and $est.clientes.ContainsKey('pagina0001') -and $est.visto -eq $t0)
+Check 'live server: another website is refused (any Origin other than null)' ((Get-RespostaVivo 'GET' '/quotes?c=pagina0002' @{ host = "127.0.0.1:$P"; origin = 'https://evil.example' } $est $P $t0).codigo -eq 403 -and -not $est.clientes.ContainsKey('pagina0002'))
+Check 'live server: a request for another host name is refused (DNS rebinding)' ((Get-RespostaVivo 'GET' '/quotes' @{ host = "evil.example:$P" } $est $P $t0).codigo -eq 403 -and (Get-RespostaVivo 'GET' '/quotes' @{ host = "localhost:$P" } $est $P $t0).codigo -eq 200)
+Check 'live server: a malformed page id is not registered' ((Get-RespostaVivo 'GET' '/quotes?c=a<b' $okC $est $P $t0).codigo -eq 200 -and (Get-RespostaVivo 'GET' '/quotes?c=short' $okC $est $P $t0).codigo -eq 200 -and $est.clientes.Count -eq 1)
+foreach ($i in 1..30) { [void](Get-RespostaVivo 'GET' "/quotes?c=massa$('{0:d5}' -f $i)" $okC $est $P $t0) }
+Check 'live server: at most 20 pages registered' ($est.clientes.Count -eq 20) $est.clientes.Count
+foreach ($k in @($est.clientes.Keys)) { if ($k -ne 'pagina0001') { [void](Get-RespostaVivo 'POST' "/bye?c=$k" $okC $est $P $t0) } }
+Check 'live server: a page that says goodbye is removed; the process keeps going while another is open' ($est.clientes.Count -eq 1 -and $null -eq $est.adeus)
+Check 'live server: goodbye from an unknown page changes nothing' ((Get-RespostaVivo 'POST' '/bye?c=desconhecida1' $okC $est $P $t0).codigo -eq 204 -and $est.clientes.Count -eq 1)
+$r = Get-RespostaVivo 'POST' '/bye?c=pagina0001' $okC $est $P $t0.AddSeconds(5)
+Check 'live server: the last page says goodbye: the time is noted (the process ends after the grace period)' ($r.codigo -eq 204 -and $est.clientes.Count -eq 0 -and $est.adeus -eq $t0.AddSeconds(5))
+[void](Get-RespostaVivo 'GET' '/quotes?c=pagina0003' $okC $est $P $t0.AddSeconds(8))
+Check 'live server: a page that comes back (reload) cancels the goodbye' ($null -eq $est.adeus -and $est.clientes.ContainsKey('pagina0003'))
+Check 'live server: /quit is refused from a browser (any Origin, even null)' ((Get-RespostaVivo 'POST' '/quit' $okC $est $P $t0).codigo -eq 403 -and -not $est.sair)
+Check 'live server: /quit from a program on this computer (no Origin) ends it' ((Get-RespostaVivo 'POST' '/quit' @{ host = "127.0.0.1:$P" } $est $P $t0).codigo -eq 204 -and $est.sair)
+Check 'live server: /ping identifies it; other paths are 404; preflight answered' ((Get-RespostaVivo 'GET' '/ping' $okC $est $P $t0).corpo -match 'bluechip-board-live' -and (Get-RespostaVivo 'GET' '/etc/passwd' $okC $est $P $t0).codigo -eq 404 -and (Get-RespostaVivo 'OPTIONS' '/quotes' $okC $est $P $t0).codigo -eq 204)
+$lanc = [IO.File]::ReadAllText((Join-Path (Split-Path $PSScriptRoot) 'Start-BluechipBoard.ps1'))
+Check 'the launcher starts the live process hidden, only after a run without errors' ($lanc -match '(?s)if \(-not \$failed\) \{\s*try \{\s*Start-Process[^\r\n]*-WindowStyle Hidden -File[^\r\n]*-Live" -WindowStyle Hidden')
+$linhaArq = @($texto -split "`n" | Where-Object { $_ -match '^\$htmlArquivo = ' })[0]
+Check 'only the main website knows the live port (not the Archive copies, not the data file)' ($texto -match '\$jsonSite = [^\n]*"vivo":\{"porta":' -and $linhaArq -match 'backup.:null' -and $linhaArq -notmatch 'vivo' -and $texto -notmatch 'vivo = \$Vivo')
+$iVivo = $texto.IndexOf('if ($AoVivo) { Start-ModoVivo $Vivo; return }'); $iTrinco = $texto.IndexOf('Local\BluechipBoard')
+Check 'the live mode returns before the run lock, the news and every file write' ($iVivo -gt 0 -and $iVivo -lt $iTrinco) "$iVivo $iTrinco"
+
 Write-Host 'Static checks'
 Check 'TLS is not pinned to 1.2 when Windows chooses (SystemDefault)' ($texto -notmatch '\]::SecurityProtocol -bor \[Net\.SecurityProtocolType\]::Tls12')
 Check 'the "<" escape is built from parts' ($texto.Contains("'\' + 'u003c'"))
