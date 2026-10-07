@@ -19,6 +19,17 @@ try {
     Write-Host $_.InvocationInfo.PositionMessage -ForegroundColor DarkRed
 }
 
+# Preços ao minuto enquanto o site está aberto: um processo escondido (Bluechip-Board.ps1 -Live) que termina sozinho quando
+# a página fecha. Um processo ao vivo de um clique anterior dá-lhe o lugar. Só depois de uma execução sem erros.
+if (-not $failed) {
+    try {
+        Start-Process -FilePath (Get-Process -Id $PID).Path -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`" -Live" -WindowStyle Hidden
+    } catch {
+        Write-Warning "Live prices could not be started: $($_.Exception.Message)"
+        $warnings += "live prices: $($_.Exception.Message)"
+    }
+}
+
 if ($failed -or $warnings.Count -gt 0) {
     Write-Host ''
     Write-Host "Finished with problems ($([int]$failed) error(s), $($warnings.Count) warning(s))." -ForegroundColor Yellow

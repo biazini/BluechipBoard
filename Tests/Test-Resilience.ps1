@@ -23,7 +23,7 @@ function Check([string]$Nome, [bool]$Cond, $Detalhe = '') { $Script:Total++; if 
 
 # ---- cópia do script com ganchos de teste ----
 $t = [IO.File]::ReadAllText((Join-Path $raiz 'Bluechip-Board.ps1'))
-$t = $t.Replace('function Get-Url {', "function Get-Url {`n    param([string]`$Url, [string]`$UserAgent = `$Script:UA, [int]`$Timeout = 25)`n    if (`$env:BB_TEST_BLOCK -and `$Url -match `$env:BB_TEST_BLOCK) { throw `"blocked by test: `$Url`" }`n    Get-UrlReal -Url `$Url -UserAgent `$UserAgent -Timeout `$Timeout`n}`nfunction Get-UrlReal {")
+$t = $t.Replace('function Get-Url {', "function Get-Url {`n    param([string]`$Url, [string]`$UserAgent = `$Script:UA, [int]`$Timeout = 25)`n    if (`$env:BB_TEST_SPARK -and `$Url -match 'finance/spark') { return [IO.File]::ReadAllText(`$env:BB_TEST_SPARK) }`n    if (`$env:BB_TEST_BLOCK -and `$Url -match `$env:BB_TEST_BLOCK) { throw `"blocked by test: `$Url`" }`n    Get-UrlReal -Url `$Url -UserAgent `$UserAgent -Timeout `$Timeout`n}`nfunction Get-UrlReal {")
 $t = $t.Replace("(New-Object -ComObject Shell.Application).NameSpace('shell:Downloads').Self.Path", '$env:BB_TEST_DOWNLOADS')
 $t = $t.Replace("Write-Passo 'Building the website'", "if (`$env:BB_TEST_FAIL) { throw 'simulated failure' }`nWrite-Passo 'Building the website'")
 # evento manual com a data mal escrita (só quando o teste o pede)
@@ -35,6 +35,11 @@ $tarefaTeste = 'BluechipBoard-Test-' + [guid]::NewGuid().ToString('N').Substring
 $t = $t.Replace("-TaskName 'BluechipBoard'", "-TaskName '$tarefaTeste'")
 # limite de tamanho do Archive: com BB_TEST_ARQ_MAX (bytes) o teste usa um limite pequeno em vez de 300 MB
 $t = $t.Replace('$total -gt 300MB', '$total -gt $(if ($env:BB_TEST_ARQ_MAX) { [int64]$env:BB_TEST_ARQ_MAX } else { 300MB })')
+# preços ao minuto: uma porta só deste teste (nunca a do processo ao vivo verdadeiro) e tempos curtos (sem página: 6 s; depois
+# da despedida: 2 s)
+$portaTeste = Get-Random -Minimum 47100 -Maximum 47800
+$t = $t.Replace('$Vivo = @{ Porta = 47821; Intervalo = 60; SemCliente = 300; Graca = 20 }', "`$Vivo = @{ Porta = $portaTeste; Intervalo = 60; SemCliente = 6; Graca = 2 }")
+$Script:Vivos = @()
 $copia = Join-Path $base 'Bluechip-Board.ps1'
 [IO.File]::WriteAllText($copia, $t, (New-Object Text.UTF8Encoding($true)))
 
@@ -233,6 +238,57 @@ try {
     Check 'reported with the chosen time' ($o -match 'scheduled every day at 07:45')
     Check 'the SEC e-mail is never stored in the task''s arguments (visible to anyone who lists the tasks); a warning says where the runs read it' ($tk.args -notmatch 'example\.com' -and $tk.args -notmatch 'EmailSEC' -and ($o -replace '\s+', ' ') -match 'does not store the e-mail given with -SecEmail') "$($tk.args) | $o"
 
+    Write-Host 'Live prices process (-Live)'
+    # resposta spark de teste: a Apple com a sessão aberta agora; o SXR8 com uma moeda errada (fica de fora)
+    $agU = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $spark = '{"spark":{"result":[{"symbol":"AAPL","response":[{"meta":{"symbol":"AAPL","currency":"USD","regularMarketPrice":341.25,"regularMarketTime":' + ($agU - 60) + ',"exchangeTimezoneName":"America/New_York","gmtoffset":-14400,"currentTradingPeriod":{"regular":{"start":' + ($agU - 3600) + ',"end":' + ($agU + 3600) + '}}}}]},{"symbol":"SXR8.DE","response":[{"meta":{"symbol":"SXR8.DE","currency":"USD","regularMarketPrice":760,"regularMarketTime":' + ($agU - 60) + '}}]}],"error":null}}'
+    $sparkF = Join-Path $base 'spark.json'; [IO.File]::WriteAllText($sparkF, $spark)
+    function Send-Http([string]$Pedido) {
+        try {
+            $c = [Net.Sockets.TcpClient]::new('127.0.0.1', $portaTeste); $s = $c.GetStream()
+            $b = [Text.Encoding]::ASCII.GetBytes($Pedido); $s.Write($b, 0, $b.Length)
+            $o = (New-Object IO.StreamReader($s)).ReadToEnd(); $c.Close(); return $o
+        } catch { return '' }
+    }
+    $hostT = "Host: 127.0.0.1:$portaTeste"
+    $quotes = { param($c, $o) Send-Http "GET /quotes?c=$c HTTP/1.1`r`n$hostT`r`n$(if ($o) { "Origin: $o`r`n" })`r`n" }
+    $corpoDe = { param($r) ($r -split "`r`n`r`n", 2)[1] }
+    function Start-Vivo([hashtable]$Env) {
+        foreach ($k in $Env.Keys) { Set-Item "env:$k" $Env[$k] }
+        try { $p = Start-Process $Shell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$copia`" -Live" -PassThru -WindowStyle Hidden; $Script:Vivos += $p; return $p }
+        finally { foreach ($k in $Env.Keys) { Remove-Item "env:$k" -ErrorAction SilentlyContinue } }
+    }
+    # espera (até 30 s) que o processo responda
+    function Wait-Vivo { for ($i = 0; $i -lt 150; $i++) { $r = Send-Http "GET /ping HTTP/1.1`r`n$hostT`r`n`r`n"; if ($r -match 'bluechip-board-live') { return $true }; Start-Sleep -Milliseconds 200 }; return $false }
+    $pv = Start-Vivo @{ BB_TEST_BLOCK = '.'; BB_TEST_SPARK = $sparkF }
+    $up = Wait-Vivo
+    $r = & $quotes 'resiltest01' 'null'; $jv = (& $corpoDe $r) | ConvertFrom-Json
+    Check 'live process: answers the board (Origin null) with the price from the source, its day and "partial" (session open)' ($up -and $r -match '^HTTP/1.1 200' -and $r -match 'Access-Control-Allow-Origin: \*' -and $jv.cotacoes.AAPL.preco -eq 341.25 -and $jv.cotacoes.AAPL.parcial -eq $true -and -not $jv.erro) $r
+    Check 'live process: a price with the wrong currency is left out and named; nothing is invented for the symbols the source did not give' (@($jv.cotacoes.PSObject.Properties).Count -eq 1 -and (@($jv.ignorados) -join ';') -match 'SXR8: currency USD' -and (@($jv.ignorados) -join ';') -match 'NVDA: no data') (@($jv.ignorados) -join ';')
+    Check 'live process: another website is refused' ((& $quotes 'resiltest09' 'https://evil.example') -match '^HTTP/1.1 403')
+    Check 'live process: a request for another host name is refused (DNS rebinding)' ((Send-Http "GET /quotes HTTP/1.1`r`nHost: evil.example:$portaTeste`r`n`r`n") -match '^HTTP/1.1 403')
+    Check 'live process: a browser cannot end it (/quit with an Origin is refused)' ((Send-Http "POST /quit HTTP/1.1`r`n$hostT`r`nOrigin: null`r`nContent-Length: 0`r`n`r`n") -match '^HTTP/1.1 403' -and -not $pv.HasExited)
+    # outro clique no atalho: o processo novo pede ao anterior que termine e fica com a porta
+    $pv2 = Start-Vivo @{ BB_TEST_BLOCK = '.'; BB_TEST_SPARK = $sparkF }
+    $saiu = $pv.WaitForExit(30000); $up2 = Wait-Vivo
+    Check 'live process: a second start (another click on the shortcut) replaces the first one' ($saiu -and $up2 -and -not $pv2.HasExited)
+    [void](& $quotes 'resiltest02' 'null')
+    $b = Send-Http "POST /bye?c=resiltest02 HTTP/1.1`r`n$hostT`r`nOrigin: null`r`nContent-Length: 0`r`n`r`n"
+    $sw = [Diagnostics.Stopwatch]::StartNew(); $saiu = $pv2.WaitForExit(20000)
+    Check 'live process: ends when the page says goodbye (closed), after the short grace period' ($b -match '^HTTP/1.1 204' -and $saiu -and $sw.Elapsed.TotalSeconds -ge 1.5) ("{0:N1} s" -f $sw.Elapsed.TotalSeconds)
+    # nenhuma página chega a abrir (ou o navegador fecha sem se despedir): termina sozinho
+    $pv3 = Start-Vivo @{ BB_TEST_BLOCK = '.'; BB_TEST_SPARK = $sparkF }
+    [void](Wait-Vivo); $saiu = $pv3.WaitForExit(30000)
+    Check 'live process: ends by itself when no page asks for prices (browser closed without a goodbye)' $saiu
+    # fonte em baixo: a página recebe o erro, sem preços
+    $pv4 = Start-Vivo @{ BB_TEST_BLOCK = '.' }
+    [void](Wait-Vivo); $jv = (& $corpoDe (& $quotes 'resiltest04' 'null')) | ConvertFrom-Json
+    Check 'live process: source down: the error is passed on, no prices' ($jv.erro -match 'blocked by test' -and @($jv.cotacoes.PSObject.Properties).Count -eq 0 -and $null -eq $jv.obtidoEm) ($jv | ConvertTo-Json -Compress)
+    $q = Send-Http "POST /quit HTTP/1.1`r`n$hostT`r`nContent-Length: 0`r`n`r`n"
+    Check 'live process: /quit from a program on this computer ends it' ($q -match '^HTTP/1.1 204' -and $pv4.WaitForExit(15000))
+    $htmlP1 = [IO.File]::ReadAllText("$p1\bluechip-board.html"); $arqP1 = @(Get-ChildItem "$p1\Archive" -Filter 'bluechip-board-2*.html')[0]
+    Check 'the main website carries the live port; the Archive copy and the data file do not' ($htmlP1.Contains("`"vivo`":{`"porta`":$portaTeste}") -and $arqP1 -and -not ([IO.File]::ReadAllText($arqP1.FullName)).Contains('"vivo":') -and -not ([IO.File]::ReadAllText("$p1\bluechip-board-data.json")).Contains('"vivo":'))
+
     Write-Host 'SEC e-mail from the local configuration (as the scheduled task and the launcher use it)'
     # bluechip-board.config.json ao lado da cópia do script: a execução sem -SecEmail usa as fontes da SEC (aqui bloqueadas)
     [IO.File]::WriteAllText((Join-Path $base 'bluechip-board.config.json'), '{ "secEmail": "cfg@example.com" }')
@@ -251,6 +307,8 @@ try {
 } finally {
     # proteção: se, apesar de tudo, a tarefa de teste tiver sido registada, é removida
     if (Get-ScheduledTask -TaskName $tarefaTeste -ErrorAction SilentlyContinue) { Unregister-ScheduledTask -TaskName $tarefaTeste -Confirm:$false }
+    # e nenhum processo ao vivo de teste fica a correr
+    foreach ($p in $Script:Vivos) { if (-not $p.HasExited) { try { $p.Kill() } catch { } } }
     Remove-Item $base -Recurse -Force -ErrorAction SilentlyContinue
 }
 Write-Host ''

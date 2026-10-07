@@ -32,6 +32,11 @@
 .PARAMETER Hora
     Time of the daily run (default 08:30). Alias: -Time.
 
+.PARAMETER AoVivo
+    Live prices: instead of a run, serves the latest price of every asset, refreshed every minute, to the website open
+    in the browser (only on this computer, 127.0.0.1). The desktop launcher starts it hidden after each run; it ends
+    when the page is closed. Alias: -Live.
+
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File .\Bluechip-Board.ps1
 
@@ -48,7 +53,8 @@ param(
     [Alias('SecEmail')][string]$EmailSEC = '',
     [Alias('NoOpen')][switch]$NaoAbrir,
     [Alias('ScheduleDaily')][switch]$AgendarDiariamente,
-    [Alias('Time')][string]$Hora = '08:30'
+    [Alias('Time')][string]$Hora = '08:30',
+    [Alias('Live')][switch]$AoVivo
 )
 
 # Mensagens em inglês na consola, incluindo os erros do próprio Windows/.NET (ex.: falhas de rede), seja qual for a língua do Windows
@@ -95,6 +101,13 @@ $Mercado = @(
     @{ Id = 'VIX';  Nome = 'VIX (volatility)';         Yahoo = '^VIX';  Stooq = '' },
     @{ Id = 'TNX';  Nome = '10-year Treasury yield';   Yahoo = '^TNX';  Stooq = '' }
 )
+
+# Preços ao minuto enquanto o site está aberto (-AoVivo, que o lançador inicia escondido depois de cada execução). O processo
+# serve as cotações só neste computador (127.0.0.1) e termina quando a página fecha. Porta: muda-a se outro programa a usar.
+# Tempos em segundos. Intervalo: entre pedidos à Yahoo (um só pedido para todos os símbolos). SemCliente: sem pedidos da
+# página durante este tempo (navegador fechado sem aviso), o processo termina. Graca: depois de a última página se despedir,
+# o tempo de espera por outra (uma página recarregada) antes de terminar.
+$Vivo = @{ Porta = 47821; Intervalo = 60; SemCliente = 300; Graca = 20 }
 
 # Pesos de referência no ETF (dados BlackRock de 30 jul 2026), usados se o download ao vivo falhar
 $PesosReferencia = @{ AAPL = 7.81; NVDA = 7.46; GOOGL = 5.52; Data = '2026-07-30' }
@@ -1244,6 +1257,8 @@ function Get-SerieNasdaq([hashtable]$Ativo, $Referencia) {
 
 # Série diária de 1 ano: Yahoo Finance (não oficial) com Stooq como alternativa.
 # Com -Desde (data Unix), devolve o histórico diário completo desde essa data, só do Yahoo (as alternativas não têm tanto histórico).
+# Fusos das bolsas na Yahoo (exchangeTimezoneName) → fusos do Windows: o dia de cada cotação conta no fuso da bolsa
+$FusosBolsa = @{ 'America/New_York' = 'Eastern Standard Time'; 'America/Chicago' = 'Central Standard Time'; 'Europe/London' = 'GMT Standard Time'; 'Europe/Berlin' = 'W. Europe Standard Time' }
 function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0, $Referencia = $null) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $nome = if ($Desde) { "Price history: $($Ativo.Nome)" } else { "Prices: $($Ativo.Nome)" }
@@ -1261,7 +1276,7 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0, $Referencia = $null) {
         if ($ts.Count -ne $cl.Count) { throw 'Timestamps and prices do not match' }
         # O dia de cada cotação conta no fuso da bolsa: no câmbio, o Yahoo marca a sessão às 00:00 de Londres,
         # que no verão são 23:00 UTC do dia anterior (em UTC as datas ficavam um dia atrasadas).
-        $tzWin = @{ 'America/New_York' = 'Eastern Standard Time'; 'America/Chicago' = 'Central Standard Time'; 'Europe/London' = 'GMT Standard Time'; 'Europe/Berlin' = 'W. Europe Standard Time' }["$($res.meta.exchangeTimezoneName)"]
+        $tzWin = $FusosBolsa["$($res.meta.exchangeTimezoneName)"]
         $tzBolsa = $null; if ($tzWin) { try { $tzBolsa = [TimeZoneInfo]::FindSystemTimeZoneById($tzWin) } catch { } }
         $diaBolsa = { param($instante) if ($tzBolsa) { [TimeZoneInfo]::ConvertTime($instante, $tzBolsa).ToString('yyyy-MM-dd', $Script:Inv) } else { $instante.AddSeconds([int]$res.meta.gmtoffset).UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv) } }
         $porData = @{}; $invalidos = 0
@@ -1367,6 +1382,145 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0, $Referencia = $null) {
             return $null
         }
     }
+}
+
+# ----------------------------------------------------------------------------
+# Preços ao minuto (-AoVivo). Um pedido "spark" da Yahoo traz a última cotação de todos os símbolos de uma vez; o site junta-a
+# à série de 1 ano com as regras do Get-Serie (o dia conta no fuso da bolsa; sessão aberta = preço parcial, não um fecho).
+# ----------------------------------------------------------------------------
+# Dia de uma cotação no fuso da bolsa (o mesmo cálculo do Get-Serie; fuso desconhecido, como o UTC da Bitcoin: gmtoffset)
+function Get-DiaBolsa($Meta, [DateTimeOffset]$Instante) {
+    $tzWin = $FusosBolsa["$($Meta.exchangeTimezoneName)"]
+    if ($tzWin) { try { return [TimeZoneInfo]::ConvertTime($Instante, [TimeZoneInfo]::FindSystemTimeZoneById($tzWin)).ToString('yyyy-MM-dd', $Script:Inv) } catch { } }
+    $Instante.AddSeconds([int]$Meta.gmtoffset).UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)
+}
+# Símbolos acompanhados ao minuto: os ativos, os indicadores de mercado e o EUR/USD (Id 'FX', o nome que o site lhe dá)
+function Get-SimbolosVivo {
+    $s = [ordered]@{}
+    foreach ($a in @($Ativos) + @($Mercado) + @(@{ Id = 'FX'; Yahoo = 'EURUSD=X'; Moeda = 'USD' })) { $s[$a.Yahoo] = @{ Id = $a.Id; Moeda = "$($a.Moeda)" } }
+    return $s
+}
+# Lê a resposta spark: por símbolo pedido, o último preço, a hora dele, o dia da bolsa e se a sessão ainda está aberta.
+# Um símbolo em falta, com moeda inesperada, preço inválido ou hora no futuro fica de fora e é contado: nunca se inventa.
+function ConvertFrom-SparkVivo([string]$Texto, $Simbolos, [DateTimeOffset]$Agora) {
+    $j = $Texto | ConvertFrom-Json
+    if ($j.spark.error) { throw "Yahoo error: $($j.spark.error.description)" }
+    if (-not $j.spark) { throw 'Unexpected Yahoo response (no spark result)' }
+    $cot = [ordered]@{}; $ignorados = @()
+    foreach ($r in @($j.spark.result)) {
+        $sim = "$($r.symbol)"; if (-not $sim -or -not $Simbolos.Contains($sim)) { continue }
+        $def = $Simbolos[$sim]; $m = @($r.response)[0].meta; $p = 0.0; $h = [int64]0
+        if (-not $m -or "$($m.symbol)" -ne $sim) { $ignorados += "$($def.Id): no data"; continue }
+        if ($def.Moeda -and "$($m.currency)" -ne $def.Moeda) { $ignorados += "$($def.Id): currency $($m.currency) (expected $($def.Moeda))"; continue }
+        if (-not [double]::TryParse("$($m.regularMarketPrice)", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$p) -or [double]::IsNaN($p) -or [double]::IsInfinity($p) -or $p -le 0) { $ignorados += "$($def.Id): invalid price"; continue }
+        if (-not [int64]::TryParse("$($m.regularMarketTime)", [ref]$h) -or $h -le 0) { $ignorados += "$($def.Id): no time"; continue }
+        $t = [DateTimeOffset]::FromUnixTimeSeconds($h)
+        if ($t -gt $Agora.AddMinutes(5)) { $ignorados += "$($def.Id): time in the future"; continue }
+        # a mesma regra do Get-Serie: hora dentro da sessão normal de hoje, ainda por fechar
+        $parcial = $false
+        try { $sess = $m.currentTradingPeriod.regular; $ini = [int64]$sess.start; $fim = [int64]$sess.end; if ($fim -gt 0 -and $h -ge $ini -and $h -lt $fim -and $Agora.ToUnixTimeSeconds() -lt $fim) { $parcial = $true } } catch { }
+        $cot[$def.Id] = [ordered]@{ preco = [math]::Round($p, 4); hora = $t.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", $Script:Inv); dia = (Get-DiaBolsa $m $t); parcial = $parcial; moeda = "$($m.currency)" }
+    }
+    foreach ($def in $Simbolos.Values) { if (-not $cot.Contains($def.Id) -and -not @($ignorados | Where-Object { $_ -like "$($def.Id):*" }).Count) { $ignorados += "$($def.Id): no data" } }
+    return [pscustomobject]@{ cotacoes = $cot; ignorados = @($ignorados) }
+}
+# Resposta a um pedido HTTP já lido. Só para 127.0.0.1/localhost nesta porta (um site com outro nome a apontar para este
+# computador, "DNS rebinding", é recusado) e só do site aberto do disco (Origin: null) ou de um programa deste computador
+# (sem Origin): qualquer outro site é recusado. /quotes regista a página (c = id aleatório dela) e devolve as cotações; /bye
+# retira-a; /quit (só sem Origin: nunca de um navegador) termina o processo, para o lançador seguinte ocupar a porta.
+function Get-RespostaVivo([string]$Metodo, [string]$Alvo, [hashtable]$Cab, $Estado, [int]$Porta, [DateTime]$Agora) {
+    $recusa = @{ codigo = 403; corpo = '' }
+    if ("$($Cab['host'])" -notin "127.0.0.1:$Porta", "localhost:$Porta") { return $recusa }
+    $origem = $Cab['origin']
+    if ($null -ne $origem -and $origem -ne 'null') { return $recusa }
+    $caminho = ($Alvo -split '\?', 2)[0]
+    $c = if ($Alvo -match '[?&]c=([A-Za-z0-9]{8,40})(&|$)') { $Matches[1] } else { '' }
+    if ($Metodo -eq 'OPTIONS') { return @{ codigo = 204; corpo = '' } }
+    if ($Metodo -eq 'GET' -and $caminho -eq '/quotes') {
+        $Estado.visto = $Agora
+        # no máximo 20 páginas registadas (as que se calam saem ao fim de SemCliente)
+        if ($c -and ($Estado.clientes.ContainsKey($c) -or $Estado.clientes.Count -lt 20)) { $Estado.clientes[$c] = $Agora; $Estado.adeus = $null }
+        return @{ codigo = 200; corpo = $Estado.json }
+    }
+    if (($Metodo -eq 'POST' -or $Metodo -eq 'GET') -and $caminho -eq '/bye') {
+        if ($c -and $Estado.clientes.ContainsKey($c)) { $Estado.clientes.Remove($c); if (-not $Estado.clientes.Count) { $Estado.adeus = $Agora } }
+        return @{ codigo = 204; corpo = '' }
+    }
+    if ($Metodo -eq 'GET' -and $caminho -eq '/ping') { return @{ codigo = 200; corpo = '{"app":"bluechip-board-live","versao":1}' } }
+    if ($Metodo -eq 'POST' -and $caminho -eq '/quit') {
+        if ($null -ne $origem) { return $recusa }
+        $Estado.sair = $true; return @{ codigo = 204; corpo = '' }
+    }
+    return @{ codigo = 404; corpo = '' }
+}
+# Lê um pedido (só o cabeçalho, até 8 KB, 2 s no máximo), responde e fecha a ligação
+function Invoke-PedidoVivo([Net.Sockets.TcpClient]$Cliente, $Estado, [int]$Porta) {
+    try {
+        $Cliente.ReceiveTimeout = 2000; $Cliente.SendTimeout = 2000
+        $s = $Cliente.GetStream(); $buf = New-Object byte[] 8192; $n = 0; $texto = ''
+        while ($n -lt $buf.Length) {
+            $k = $s.Read($buf, $n, $buf.Length - $n); if ($k -le 0) { break }
+            $n += $k; $texto = [Text.Encoding]::ASCII.GetString($buf, 0, $n); if ($texto -match "`r`n`r`n") { break }
+        }
+        $linhas = @($texto -split "`r`n"); $pri = @($linhas[0] -split ' ')
+        $cab = @{}; foreach ($l in @($linhas | Select-Object -Skip 1)) { if ($l -match '^([A-Za-z0-9-]+):\s*(.*)$') { $cab[$Matches[1].ToLowerInvariant()] = $Matches[2].Trim() } }
+        $r = if ($pri.Count -ge 3) { Get-RespostaVivo $pri[0] $pri[1] $cab $Estado $Porta ([DateTime]::UtcNow) } else { @{ codigo = 400; corpo = '' } }
+        $corpo = [Text.Encoding]::UTF8.GetBytes([string]$r.corpo)
+        $frase = @{ 200 = 'OK'; 204 = 'No Content'; 400 = 'Bad Request'; 403 = 'Forbidden'; 404 = 'Not Found' }[[int]$r.codigo]
+        $cabResp = "HTTP/1.1 $($r.codigo) $frase`r`nContent-Type: application/json; charset=utf-8`r`nContent-Length: $($corpo.Length)`r`nCache-Control: no-store`r`nAccess-Control-Allow-Origin: *`r`nAccess-Control-Allow-Methods: GET, POST`r`nConnection: close`r`n`r`n"
+        $b = [Text.Encoding]::ASCII.GetBytes($cabResp); $s.Write($b, 0, $b.Length); if ($corpo.Length) { $s.Write($corpo, 0, $corpo.Length) }
+    } catch { } finally { $Cliente.Close() }
+}
+# O processo ao vivo: ocupa a porta (pede a um processo ao vivo anterior que termine), pede as cotações a cada Intervalo
+# enquanto houver uma página aberta e termina quando a última se despede (ou se cala durante SemCliente)
+function Start-ModoVivo([hashtable]$Cfg) {
+    $porta = [int]$Cfg.Porta; $ouvinte = $null
+    for ($i = 0; $i -lt 60 -and -not $ouvinte; $i++) {
+        try {
+            # ExclusiveAddressUse: nenhum outro programa se pode ligar à mesma porta por cima deste
+            $l = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $porta)
+            $l.ExclusiveAddressUse = $true; $l.Start(); $ouvinte = $l
+        } catch {
+            # porta ocupada: se for um processo ao vivo anterior (outro clique no atalho), pede-lhe que termine; outro programa fica
+            if ($i % 10 -eq 0) { try { if ((Invoke-WebRequest -Uri "http://127.0.0.1:$porta/ping" -UseBasicParsing -TimeoutSec 3).Content -match 'bluechip-board-live') { Invoke-WebRequest -Uri "http://127.0.0.1:$porta/quit" -Method Post -UseBasicParsing -TimeoutSec 3 | Out-Null } } catch { } }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    if (-not $ouvinte) { Write-Warning "Live prices: port $porta on this computer is used by another program. Change `$Vivo.Porta in the script."; return }
+    $simbolos = Get-SimbolosVivo
+    $url = 'https://query1.finance.yahoo.com/v7/finance/spark?symbols=' + (@($simbolos.Keys | ForEach-Object { [uri]::EscapeDataString($_) }) -join ',') + '&range=1d&interval=1d'
+    $inicio = [DateTime]::UtcNow
+    $foto = [ordered]@{ versao = 1; obtidoEm = $null; fonte = 'Yahoo Finance'; cotacoes = [ordered]@{}; ignorados = @(); erro = 'starting: no prices yet' }
+    $estado = @{ clientes = @{}; visto = $inicio; adeus = $null; sair = $false; json = ($foto | ConvertTo-Json -Depth 4 -Compress) }
+    $antes = $inicio; $proxima = $inicio; $espera = [int]$Cfg.Intervalo; $tentou = $false
+    Write-Host "Live prices on http://127.0.0.1:$porta, every $($Cfg.Intervalo) s while the board is open."
+    try {
+        while (-not $estado.sair) {
+            $agora = [DateTime]::UtcNow
+            # o computador esteve suspenso: o tempo parado não conta como silêncio das páginas (voltam a pedir dentro de 1 minuto)
+            if (($agora - $antes).TotalSeconds -gt 90) { foreach ($k in @($estado.clientes.Keys)) { $estado.clientes[$k] = $agora }; $estado.visto = $agora; $proxima = $agora }
+            $antes = $agora
+            foreach ($k in @($estado.clientes.Keys)) { if (($agora - $estado.clientes[$k]).TotalSeconds -gt $Cfg.SemCliente) { $estado.clientes.Remove($k) } }
+            if (-not $estado.clientes.Count -and $estado.adeus -and ($agora - $estado.adeus).TotalSeconds -gt $Cfg.Graca) { break }
+            if (($agora - $estado.visto).TotalSeconds -gt $Cfg.SemCliente) { break }
+            # sem páginas abertas não se pede nada (só o primeiro pedido, para a página que está a abrir)
+            if ($agora -ge $proxima -and ($estado.clientes.Count -or -not $tentou)) {
+                $tentou = $true
+                try {
+                    $r = ConvertFrom-SparkVivo (Get-Url $url -Timeout 10) $simbolos ([DateTimeOffset]$agora)
+                    if (-not $r.cotacoes.Count) { throw 'no valid price in the answer' }
+                    $foto = [ordered]@{ versao = 1; obtidoEm = $agora.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", $Script:Inv); fonte = 'Yahoo Finance'; cotacoes = $r.cotacoes; ignorados = @($r.ignorados); erro = $null }
+                    $espera = [int]$Cfg.Intervalo
+                } catch {
+                    # ficam as últimas cotações boas (com a hora delas); o erro segue para a página, e os pedidos espaçam-se até 15 min
+                    $foto.erro = "$($_.Exception.Message)"; $espera = [math]::Min($espera * 2, 900)
+                }
+                $estado.json = $foto | ConvertTo-Json -Depth 4 -Compress
+                $proxima = [DateTime]::UtcNow.AddSeconds($espera)
+            }
+            if ($ouvinte.Pending()) { Invoke-PedidoVivo $ouvinte.AcceptTcpClient() $estado $porta } else { Start-Sleep -Milliseconds 200 }
+        }
+    } finally { $ouvinte.Stop() }
 }
 
 function Get-TaxaBCE {
@@ -1846,6 +2000,7 @@ transition:background .15s,color .15s,box-shadow .15s}
 .hero-meta{display:flex;flex-direction:column;gap:5px;font-size:.8rem;color:var(--muted)}
 .hero-meta span{display:inline-flex;align-items:center;gap:6px}.hero-meta .i{width:14px;height:14px;color:var(--faint)}
 .hero-meta b{color:var(--ink);font-weight:650}
+.hero-meta .vivo{cursor:help}.hero-meta .vivo.on .i{color:var(--pos)}
 .tickers{display:grid;grid-template-columns:minmax(0,1fr);gap:10px}
 .tk{position:relative;display:grid;grid-template-columns:auto minmax(0,1fr) auto;grid-template-areas:"badge id price" "badge eur chg" "spark spark spark" "rows rows rows" "range range range";row-gap:2px;
 column-gap:10px;align-items:center;background:var(--surface);border:1px solid var(--rule);border-radius:var(--r-l);padding:16px 16px 14px;box-shadow:var(--sh-1);overflow:hidden;
@@ -2700,6 +2855,9 @@ const cls=v=>v==null?'':(v>=0?'pos':'neg');
 const esc=s=>String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const safe=u=>/^https?:\/\//i.test(u||'')?u:'#';
 const GEN=Date.parse(D.geradoEm)||Date.now(),DAY=864e5;
+/* instante a que os preços se referem: o da execução, e depois o da última atualização ao minuto (ver "preços ao minuto").
+   A frescura de cada preço conta a partir daqui: um ativo que deixe de ser atualizado passa a aparecer como atrasado. */
+let T_PRECOS=GEN;
 const MES=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],WD=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 /* datas e horas sempre na hora de Lisboa, seja qual for o fuso do computador */
 const LIS='Europe/Lisbon';
@@ -2820,13 +2978,13 @@ const fdS=iso=>{const q=String(iso).split('-');return(+q[2])+' '+MES[+q[1]-1];};
 function sessaoFechada(b,t){const p=tzParts(t,b.tz);for(let i=0;i<20;i++){const dt=Date.UTC(+p.year,+p.month-1,+p.day-i),iso=isoU(dt),y=+iso.slice(0,4);if(wdU(dt)===0||wdU(dt)===6||ehFeriado(b,iso,y))continue;const q=iso.split('-').map(Number),f=zoned(q[0],q[1],q[2],fechoDe(b,iso,y),b.tz);if(f<=t)return{iso,f};}return null;}
 function sessoesDepois(b,isoA,isoB){let n=0;for(let t=Date.parse(isoA+'T00:00:00Z')+DAY,e=Date.parse(isoB+'T00:00:00Z');t<=e;t+=DAY){const iso=isoU(t);if(wdU(t)===0||wdU(t)===6||ehFeriado(b,iso,+iso.slice(0,4)))continue;n++;}return n;}
 function frescura(id,pts){if(!pts||!pts.length)return null;const last=pts[pts.length-1][0],iso=isoU(last);
- if(id==='BTC'){const falta=Math.max(0,Math.round((Date.parse(isoU(GEN)+'T00:00:00Z')-DAY-last)/DAY));return{iso,falta,velho:falta>=1,un:'day'};}
+ if(id==='BTC'){const falta=Math.max(0,Math.round((Date.parse(isoU(T_PRECOS)+'T00:00:00Z')-DAY-last)/DAY));return{iso,falta,velho:falta>=1,un:'day'};}
  const b=id==='FX'?FXB:arr(D.bolsas).find(x=>x.id===BOLSA_DE[id]);if(!b)return{iso,falta:0,velho:false,un:'session'};
- const e=sessaoFechada(b,GEN);if(!e||iso>=e.iso)return{iso,falta:0,velho:false,un:'session'};
+ const e=sessaoFechada(b,T_PRECOS);if(!e||iso>=e.iso)return{iso,falta:0,velho:false,un:'session'};
  const falta=sessoesDepois(b,iso,e.iso);
  /* uma sessão em falta é normal logo a seguir ao fecho; ao fim de 6 h (ou 2 sessões) já é atraso da fonte. No câmbio,
     que tem dias sem cotação no Natal e no Ano Novo, só 2 ou mais. */
- return{iso,falta,velho:falta>=2||(id!=='FX'&&falta===1&&GEN-e.f>6*36e5),un:'session'};}
+ return{iso,falta,velho:falta>=2||(id!=='FX'&&falta===1&&T_PRECOS-e.f>6*36e5),un:'session'};}
 const antigo=a=>/previous run/i.test(a.fonte||'');
 function asOf(a,fr){if(!fr)return'';const via=antigo(a)?' · previous run':(a.fonte&&a.fonte!=='Yahoo Finance'?' · via '+a.fonte:'');
  if(a.parcial&&a.hora&&isFinite(Date.parse(a.hora)))return`live ${hmL(Date.parse(a.hora))}`+via;return(a.id==='BTC'?'day ':'close ')+fdS(fr.iso)+via;}
@@ -2840,7 +2998,7 @@ function spark(pts,c){const p=pts.length?pts.filter(x=>x[0]>=pts[pts.length-1][0
  const d=p.map((x,i)=>(i?'L':'M')+X(i).toFixed(1)+','+Y(x[1]).toFixed(1)).join('');
  return`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true" focusable="false"><path d="${d}L${W},${H}L0,${H}Z" style="fill:${c};opacity:.08"/><path d="${d}" style="fill:none;stroke:${c};stroke-width:1.7;stroke-linejoin:round;vector-effect:non-scaling-stroke"/></svg>`;}
 function renderHero(){const fx=FX.length?FX[FX.length-1][1]:null;
- $('#heroSub').innerHTML=`<span>${ic('clock')}Generated on <b>${fdt(GEN)}</b> at <b>${hmL(GEN)}</b> Lisbon time</span><span>${ic('newspaper')}News from the last ${esc(D.dias)} days · 1 year of prices</span><span>${ic('euro')}EUR/USD <b>${fx?nf(fx,4):'unavailable'}</b></span>`;
+ $('#heroSub').innerHTML=`<span>${ic('clock')}Generated on <b>${fdt(GEN)}</b> at <b>${hmL(GEN)}</b> Lisbon time</span><span>${ic('newspaper')}News from the last ${esc(D.dias)} days · 1 year of prices</span><span>${ic('euro')}EUR/USD <b>${fx?nf(fx,4):'unavailable'}</b></span>${VIVO?'<span id="vivoEst"></span>':''}`;estadoVivo();
  $('#tickers').innerHTML=ATIVOS.map(a=>{const s=stats(a.pts),m=(a.moeda||'').toUpperCase(),sym=m==='EUR'?'€':'$',c=heroColor(a),nm=ehEtf(a.id)?'ETF '+etfIdx(a.id):a.nome,fr=frescura(a.id,a.pts),ao=asOf(a,fr);
   const head=`<span class="tk-badge">${ic((CO[a.id]||{}).i||'chart')}</span><div class="tk-id"><span class="tk-name">${ehEtf(a.id)?'<span class="lg">ETF </span>'+esc(etfIdx(a.id)):esc(nm)}</span><span class="tk-sym">${esc(a.simbolo)}${m?'<span class="lg"> · '+esc(m)+'</span>':''}${ao?` · <span class="asof${fr&&(fr.velho||antigo(a))?' old':''}" title="${fr&&fr.velho?`${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind: the source may be lagging`:'Date of the latest price'}">${esc(ao)}</span>`:''}</span></div>`;
   if(!s)return`<article class="tk${HERO_LUGAR[a.id]||''}" data-tk="${a.id}" style="--c:${c}">${head}<p class="tk-empty">No prices. See the Sources section.</p></article>`;
@@ -2852,7 +3010,7 @@ function renderHero(){const fx=FX.length?FX[FX.length-1][1]:null;
    `<dl class="tk-rows"><div><dt>1 month</dt><dd class="${cls(s.m1)}">${pct(s.m1)}</dd></div><div><dt title="Distance from the 52-week high">From <span class="lg">52-week </span>high</dt><dd>${pct(s.dist)}</dd></div></dl>`+range+`</article>`;}).join('')+cartaoFx();}
 /* EUR/USD no fim do panorama: a mesma série usada nas conversões (FX, com as alternativas e a data de cada taxa).
    O gráfico completo continua em Currency & Macroeconomics. */
-function cartaoFx(){const a={id:'FX',nome:'EUR/USD',simbolo:'EURUSD=X',pts:FX,parcial:!!(D.fx&&D.fx.parcial),hora:null,fonte:/^Yahoo/.test(FXSRC)?'Yahoo Finance':FXSRC},s=stats(FX),c='var(--ink)',fr=FX.length?frescura('FX',FX):null,ao=asOf(a,fr),bl=BCE.length?BCE[BCE.length-1]:null;
+function cartaoFx(){const a={id:'FX',nome:'EUR/USD',simbolo:'EURUSD=X',pts:FX,parcial:FXVIVO?FXVIVO.parcial:!!(D.fx&&D.fx.parcial),hora:FXVIVO?FXVIVO.hora:null,fonte:/^Yahoo/.test(FXSRC)?'Yahoo Finance':FXSRC},s=stats(FX),c='var(--ink)',fr=FX.length?frescura('FX',FX):null,ao=asOf(a,fr),bl=BCE.length?BCE[BCE.length-1]:null;
  const head=`<span class="tk-badge">${ic('euro')}</span><div class="tk-id"><span class="tk-name">EUR/USD</span><span class="tk-sym">EURUSD=X${ao?` · <span class="asof${fr&&(fr.velho||antigo(a))?' old':''}" title="${fr&&fr.velho?`${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind: the source may be lagging`:'Date of the latest rate'}">${esc(ao)}</span>`:''}</span></div>`;
  if(!s)return`<article class="tk${HERO_LUGAR.FX}" data-tk="FX" style="--c:${c}">${head}<p class="tk-empty">No EUR/USD rate in this run: see the Sources section.</p></article>`;
  const range=s.hi!=null?(()=>{const rp=Math.max(0,Math.min(100,(s.last-s.lo)/((s.hi-s.lo)||1)*100));return`<div class="range" data-tip="52-week range: ${nf(s.lo,4)} – ${nf(s.hi,4)}"><div class="range-bar"><span class="range-fill" style="width:${rp}%"></span><span class="range-mk" style="left:${rp}%"></span></div><div class="range-lbl"><span>${nf(s.lo,4)}</span><span>52-week low and high</span><span>${nf(s.hi,4)}</span></div></div>`;})():'';
@@ -3151,9 +3309,9 @@ function corr(a,b){const mb=new Map(b.map(p=>[p[0],p[1]])),c=a.filter(p=>mb.has(
 const grande=v=>v==null||!isFinite(v)?'—':v>=1e12?nf(v/1e12,2)+' trillion':v>=1e9?nf(v/1e9,1)+' billion':nf(v/1e6,0)+' million';
 function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.mercado,fg=B.sentimento,rd=B.rede,p=a?a.pts:[],s=stats(p),fx=FX.length?FX[FX.length-1][1]:null;
  $('#btcLead').textContent=`Bitcoin trades 24 hours a day, 7 days a week, and is tracked here in euros (BTC/EUR).${s?` Last price: €${nf(s.last,0)}; ${pct(s.m1)} over a month, ${pct(s.y1)} over a year and ${pct(s.dist)} from its 52-week high.`:' No prices in this run: see the Sources section.'}`;
- const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,v24=m&&m.var24!=null&&isFinite(m.var24)?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
+ const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,m24=!!(m&&m.var24!=null&&isFinite(m.var24)),v24=m24?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
  $('#btcKpis').innerHTML=k('bitcoin','Price',s?'€'+nf(s.last,0):(m?'€'+nf(m.eur,0):'—'),m&&m.usd?`≈ $${nf(m.usd,0)}`:(s&&fx?`≈ $${nf(s.last*fx,0)}`:'in euros'))+
-  k('clock','24 hours',pct(v24),m?'change over the last 24 h':'since 00:00 UTC',cls(v24))+
+  k('clock',m24?'24 hours':'Today (UTC)',pct(v24),m24?'change over the last 24 h':'since 00:00 UTC',cls(v24))+
   k('calendar','7 days',pct(w1),s?`30 days: ${pct(s.m1)}`:'',cls(w1))+
   k('activity','Volatility',s&&s.vol!=null?nf(s.vol,0)+'%':'—',`annualised, 30 days${gs&&gs.vol!=null?` · S&amp;P 500: ${nf(gs.vol,0)}%`:''}`);
  const sl=slice(p),t0=sl.length?sl[0][0]:0,cut=x=>x.filter(q=>q[0]>=t0),ch=sl.length>1?(sl[sl.length-1][1]/sl[0][1]-1)*100:null;
@@ -3512,7 +3670,7 @@ function xirr(fl,base){if(!fl.length||!fl.some(x=>x[1]<0)||!fl.some(x=>x[1]>0)||
    (não anualizada). Benchmark: cada compra (de qualquer ativo, Bitcoin incluída) compra SXR8 pelos mesmos euros ao fecho
    desse dia ou ao último fecho anterior (HIST); cada venda retira os mesmos euros; sem unidades suficientes, vende-as
    todas e assinala-o. Uma data anterior ao histórico do SXR8 deixa o benchmark "Unavailable". */
-function rentab(R){R=R||pfDados();const F=fluxosCarteira(),C=carteira(),pl=tzParts(GEN,LIS),tFim=Date.UTC(+pl.year,+pl.month-1,+pl.day);
+function rentab(R){R=R||pfDados();const F=fluxosCarteira(),C=carteira(),pl=tzParts(T_PRECOS,LIS),tFim=Date.UTC(+pl.year,+pl.month-1,+pl.day);
  const B={estado:'na',r:null,valor:null,unidades:null,curto:false,t:null,inicio:null,tPreco:null};
  const X={estado:'ok',r:null,anual:true,dias:null,t0:null,tFim,valor:null,fl:[],falta:[],motivo:'',nC:F.filter(x=>x.tipo==='buy').length,nV:F.filter(x=>x.tipo==='sell').length,bench:B,dif:null};
  const semP=arr(store.get('buys',[])).concat(arr(store.get('sales',[]))).filter(x=>x&&+x.q>0&&!(+x.p>0)).length+arr(store.get('lots',[])).filter(x=>x&&+x.q>0&&!(+x.c>0)).length;
@@ -4058,6 +4216,60 @@ function renderBolsas(){const box=$('#mkts');if(!box)return;const now=Date.now()
  box.innerHTML=arr(D.bolsas).map(b=>{const s=sessao(b,now);if(!s)return'';const dia=mesmoDiaL(s.a,now)?'Today':diaL(s.a),est=s.aberta?'Open':'Closed',quando=s.aberta?'closes in '+falta(s.f-now):'opens in '+falta(s.a-now);
   return`<div class="mkt${s.aberta?' open':''}" title="${esc(b.nome)} (${esc(b.detalhe)}). ${est}: ${quando}. ${dia}, ${hmL(s.a)} to ${hmL(s.f)}, Lisbon time${s.curta?' (shortened session)':''}."><span class="mkt-top"><i class="mkt-dot" aria-hidden="true"></i><b>${esc(b.curto)}</b><span class="mkt-st">${est}</span></span><span class="mkt-when">${dia} · ${hmL(s.a)}–${hmL(s.f)}<small>Lisbon</small></span><span class="sr"> ${quando}</span></div>`;}).join('');}
 
+/* ---------- preços ao minuto ---------- */
+/* Com o site aberto pelo atalho, um processo em segundo plano (Bluechip-Board.ps1 -Live) traz a última cotação de cada ativo
+   a cada minuto, só neste computador (127.0.0.1). A página pede-a a cada minuto, e esse pedido é também o sinal de que
+   continua aberta: ao fechar, despede-se (/bye) e o processo termina. Cada preço entra com as regras do script: conta no dia
+   da bolsa, com a sessão aberta é um preço parcial ("live"), e nunca a mais de 50 % do fecho anterior. Só a página em
+   memória muda: o ficheiro do site e os dados guardados ficam como a execução os deixou. */
+const VIVO=D.vivo&&Number.isInteger(+D.vivo.porta)&&+D.vivo.porta>0&&+D.vivo.porta<65536?{url:'http://127.0.0.1:'+(+D.vivo.porta),id:(Math.random().toString(36).slice(2)+Date.now().toString(36)).slice(0,20)}:null;
+const VIVO_MS=60000;
+let vivoT=0,vivoFalhas=0,vivoJa=false,vivoEm=0,vivoErro='',vivoPausa=false,FXVIVO=null;
+/* junta uma cotação à série (substitui o ponto do mesmo dia); devolve false se não a aceitar */
+function pontoVivo(a,q){const p=+q.preco,t=/^\d{4}-\d{2}-\d{2}$/.test(q.dia||'')?Date.parse(q.dia+'T00:00:00Z'):NaN;
+ if(!(p>0)||!isFinite(p)||!isFinite(t)||!isFinite(Date.parse(q.hora)))return false;
+ if(a.moeda&&q.moeda&&String(q.moeda).toUpperCase()!==String(a.moeda).toUpperCase())return false;
+ const P=a.pts,n=P.length;if(n<2)return false;
+ const L=P[n-1];if(t<L[0])return false;
+ /* mais de 6 dias depois do último ponto (a série parou): a variação "da última sessão" seria de vários dias */
+ if(t-L[0]>6*DAY)return false;
+ const ref=t===L[0]?P[n-2][1]:L[1];if(Math.abs(p/ref-1)>.5)return false;
+ if(t===L[0])P[n-1]=[t,p];else P.push([t,p]);return true;}
+/* aplica uma resposta do processo; devolve quantos preços mudaram */
+function aplicaVivo(j){if(!j||typeof j!=='object'||j.versao!==1)return 0;vivoErro=j.erro?String(j.erro).slice(0,200):'';
+ const Q=j.cotacoes&&typeof j.cotacoes==='object'?j.cotacoes:{},em=Date.parse(j.obtidoEm);if(!isFinite(em)||em<=vivoEm)return 0;vivoEm=em;
+ const q=id=>Q[id]&&typeof Q[id]==='object'?Q[id]:null;let n=0,btc=false;
+ ATIVOS.concat(MERC).forEach(a=>{const x=q(a.id);if(x&&pontoVivo(a,x)){a.parcial=!!x.parcial;a.hora=x.hora;n++;if(a.id==='BTC')btc=true;}});
+ /* o EUR/USD só quando a série é a da Yahoo (com uma alternativa, a cotação da Yahoo não se junta a outra fonte) */
+ if(q('FX')&&/^Yahoo/.test(FXSRC)&&pontoVivo({pts:FX,moeda:'USD'},q('FX'))){FXVIVO={parcial:!!q('FX').parcial,hora:q('FX').hora};n++;}
+ if(n)T_PRECOS=Math.max(T_PRECOS,em);
+ /* a variação de 24 h e o preço em dólares da CoinGecko são da hora da execução: com o preço da Bitcoin ao minuto deixariam
+    de bater certo (o cartão passa a mostrar a variação desde as 00:00 UTC, com o preço atual) */
+ if(btc&&D.bitcoin&&D.bitcoin.mercado){D.bitcoin.mercado.var24=null;D.bitcoin.mercado.usd=null;}
+ return n;}
+/* só o que mostra preços; nenhuma destas funções cria campos de formulário, por isso nada do que se está a escrever se perde */
+function redesenhaVivo(){renderHero();marcaTk();renderAlerts();renderStats();drawPf();drawBuys();drawLots();if(curTab==='prices'||curTab==='fx'||curTab==='bitcoin')CHARTS[curTab]();}
+function estadoVivo(){const e=$('#vivoEst');if(!e||!VIVO)return;const t=vivoEm?hmL(vivoEm):'';let h,tt;
+ if(vivoJa&&vivoFalhas<2){if(vivoErro&&vivoEm){h=`Live prices: the source is not answering (latest from <b>${t}</b>)`;tt='Yahoo Finance did not answer the last request: the prices shown are from '+t+'. The next attempts are spaced out.';}
+  else if(vivoErro){h='Live prices: waiting for the first prices';tt='Yahoo Finance has not answered yet.';}
+  else{h=`Live prices, updated <b>${t}</b>`;tt='Prices are refreshed every minute while this page is open (Yahoo Finance). Each card shows the time of its latest trade.';}}
+ else if(vivoJa){h=`Live prices stopped at <b>${t||'—'}</b>`;tt='The background process is not answering. It ends when the page is closed, or after 5 minutes without hearing from it. Open the board from the desktop shortcut again to restart it.';}
+ else if(vivoFalhas<24){h='Live prices: connecting…';tt='Waiting for the background process started by the desktop shortcut.';}
+ else{h='Live prices off';tt='Open the board from the desktop shortcut to refresh the prices every minute. Without it, the prices are those of the last run.';}
+ e.innerHTML=ic(vivoJa&&vivoFalhas<2&&!vivoErro?'activity':'clock')+h;e.title=tt;e.className='vivo'+(vivoJa&&vivoFalhas<2&&!vivoErro?' on':'');}
+let vivoVoo=false;   /* um pedido de cada vez */
+function vivoPede(){if(!VIVO||vivoPausa||vivoVoo)return;clearTimeout(vivoT);vivoVoo=true;
+ fetch(VIVO.url+'/quotes?c='+VIVO.id,{cache:'no-store'}).then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+  .then(j=>{vivoFalhas=0;vivoJa=true;try{if(aplicaVivo(j))redesenhaVivo();}catch(e){console.error(e);}},()=>{vivoFalhas++;})
+  .then(()=>{vivoVoo=false;estadoVivo();clearTimeout(vivoT);if(!vivoPausa)vivoT=setTimeout(vivoPede,vivoJa||vivoFalhas>=24?VIVO_MS:5000);});}
+function ligaVivo(){if(!VIVO)return;
+ /* ao fechar (ou recarregar) a página: despede-se, e o processo termina se não houver outra página aberta */
+ addEventListener('pagehide',()=>{vivoPausa=true;clearTimeout(vivoT);try{navigator.sendBeacon(VIVO.url+'/bye?c='+VIVO.id);}catch(e){}});
+ addEventListener('pageshow',e=>{if(e.persisted){vivoPausa=false;vivoPede();}});
+ /* ao voltar a este separador, pede logo (o navegador espaça os temporizadores dos separadores escondidos) */
+ document.addEventListener('visibilitychange',()=>{if(!document.hidden&&!vivoPausa)vivoPede();});
+ vivoPede();}
+
 /* ---------- navigation & filters ---------- */
 const TABS=$$('.rail a').map(a=>a.dataset.tab);
 /* os gráficos medem o contentor: voltam a ser desenhados quando o separador fica visível ou a janela muda de largura */
@@ -4069,7 +4281,8 @@ let curTab='overview',rsz=0,lastW=0;
 function showTab(id,scroll){if(!TABS.includes(id))id='overview';$$('.panel').forEach(p=>p.hidden=p.dataset.panel!==id);curTab=id;if(CHARTS[id])CHARTS[id]();$$('.rail a').forEach(a=>a.dataset.tab===id?a.setAttribute('aria-current','page'):a.removeAttribute('aria-current'));try{history.replaceState(null,'','#'+id);}catch(e){}
  const rail=$('#rail'),cur=$('.rail a[aria-current]');if(cur&&rail.scrollWidth>rail.clientWidth)rail.scrollLeft=cur.offsetLeft-(rail.clientWidth-cur.offsetWidth)/2;
  if(scroll){const y=$('.layout').getBoundingClientRect().top+scrollY-$('#topbar').offsetHeight-8;if(scrollY>y)scrollTo(0,y);$('#main').focus({preventScroll:true});}}
-function renderAll(){$$('.chip[data-co]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.co===st.co)));$$('.tk').forEach(t=>t.classList.toggle('dim',st.co!=='all'&&!(t.dataset.tk===st.co||(st.co==='MKT'&&(t.dataset.tk==='SXR8'||t.dataset.tk==='FX')))));
+function marcaTk(){$$('.tk').forEach(t=>t.classList.toggle('dim',st.co!=='all'&&!(t.dataset.tk===st.co||(st.co==='MKT'&&(t.dataset.tk==='SXR8'||t.dataset.tk==='FX')))));}
+function renderAll(){$$('.chip[data-co]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.co===st.co)));marcaTk();
  renderAlerts();renderNews();renderPrices();renderFx();renderCal();renderEtf();drawEtfMore();renderBtc();drawPf();renderSrc();renderStats();if(curTab==='fundamentals')renderFund();}
 function setTopbarH(){document.documentElement.style.setProperty('--topbar-h',$('#topbar').offsetHeight+'px');}
 function init(){guilloche();renderHero();
@@ -4107,10 +4320,10 @@ function init(){guilloche();renderHero();
  addEventListener('hashchange',()=>showTab(location.hash.slice(1),false));
  addEventListener('resize',setTopbarH);setTopbarH();
  const redraw=()=>{const w=$('#main').clientWidth;if(w&&Math.abs(w-lastW)>2){lastW=w;if(CHARTS[curTab])CHARTS[curTab]();}};
- if(window.ResizeObserver)new ResizeObserver(()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);}).observe($('#main'));else addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);});renderAll();renderBolsas();setInterval(renderBolsas,30000);setTopbarH();showTab((location.hash||'#overview').slice(1),false);}
+ if(window.ResizeObserver)new ResizeObserver(()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);}).observe($('#main'));else addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);});renderAll();renderBolsas();setInterval(renderBolsas,30000);ligaVivo();setTopbarH();showTab((location.hash||'#overview').slice(1),false);}
 init();
 /* gancho para os testes automáticos (Tests\Test-Site.ps1): só existe se a página de teste o definir antes */
-if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro,c2,pendente,guardaFicheiro,auto:()=>AUTO,setFH:h=>{FH=h;PEDIU=false;}});
+if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro,c2,pendente,guardaFicheiro,auto:()=>AUTO,setFH:h=>{FH=h;PEDIU=false;},vivo:{aplica:aplicaVivo,ponto:pontoVivo,redesenha:redesenhaVivo,estado:estadoVivo,VIVO,tPrecos:()=>T_PRECOS,set:o=>{if("ja" in o)vivoJa=o.ja;if("falhas" in o)vivoFalhas=o.falhas;}}});
 })();
 </script>
 </body>
@@ -4121,6 +4334,9 @@ if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,f
 # ============================================================================
 # 4. EXECUÇÃO
 # ============================================================================
+
+# Preços ao minuto (-AoVivo): só o processo em segundo plano do lançador. Não recolhe notícias nem escreve ficheiros.
+if ($AoVivo) { Start-ModoVivo $Vivo; return }
 
 # Sem -EmailSEC, o e-mail da configuração local (nunca nos argumentos da tarefa agendada nem no git)
 $emailLocal = Get-EmailSecLocal $PSScriptRoot
@@ -4515,7 +4731,8 @@ $json = ($dados | ConvertTo-Json -Depth 10 -Compress).Replace('<', $escapeMenor)
 # Os dados pessoais (compras) só entram no site principal, que os carrega sozinho ao abrir. O arquivo e o ficheiro
 # de dados ficam sem eles, para não haver 30 cópias da carteira espalhadas pela pasta Archive.
 $jsonBackup = if ($backup) { ($backup | ConvertTo-Json -Depth 10 -Compress).Replace('<', $escapeMenor) } else { 'null' }
-$jsonSite = '{"backup":' + $jsonBackup + ',' + $json.Substring(1)
+# Preços ao minuto: só o site principal sabe a porta do processo ao vivo (uma cópia antiga do Archive fica com os preços dela)
+$jsonSite = '{"backup":' + $jsonBackup + ',"vivo":{"porta":' + [int]$Vivo.Porta + '},' + $json.Substring(1)
 $htmlSite = (Get-Plantilla).Replace('__DADOS_JSON__', $jsonSite)
 $htmlArquivo = (Get-Plantilla).Replace('__DADOS_JSON__', '{"backup":null,' + $json.Substring(1))
 $utf8 = New-Object System.Text.UTF8Encoding($false)

@@ -1031,7 +1031,52 @@ const SC={
   const c=document.querySelector('.tk[data-tk="BTC"] .chg'),s=api.stats(api.ATIVOS.find(x=>x.id==='BTC').pts);
   ok('Bitcoin without the CoinGecko 24 h change: the card shows the change since 00:00 UTC, not +0.00%',c&&/since 00:00 UTC/.test(c.getAttribute('title')||'')&&(s.d1===0||!/^\+?0\.00%/.test(c.textContent.trim())),c&&(c.getAttribute('title')+' '+c.textContent));
   const aa=api.ATIVOS.find(x=>x.id==='AAPL');
-  ok('a price point without a value is left out (never read as a price of 0)',aa.pts.every(p=>p[1]>0)&&!api.alerts().some(x=>x.co==='AAPL'&&/fell 100/.test(x.txt)),JSON.stringify(aa.pts.filter(p=>!(p[1]>0))));}},
+  ok('a price point without a value is left out (never read as a price of 0)',aa.pts.every(p=>p[1]>0)&&!api.alerts().some(x=>x.co==='AAPL'&&/fell 100/.test(x.txt)),JSON.stringify(aa.pts.filter(p=>!(p[1]>0))));
+  const kb=txt('#btcKpis');
+  ok('Bitcoin section without the CoinGecko 24 h change: the indicator is labelled "Today (UTC)", since 00:00 UTC (not "24 hours")',/Today \(UTC\)/.test(kb)&&/since 00:00 UTC/.test(kb)&&!/change over the last 24 h/.test(kb),kb);}},
+ /* preços ao minuto: o que a página faz com cada resposta do processo em segundo plano (sem processo: porta 1, nada responde) */
+ live:{prep(d){d.vivo={porta:1};G.gen=Date.parse(d.geradoEm);seed({buys:[{id:'lv1',a:'AAPL',d:'2026-01-05',q:2,p:200}]});},test(api){
+  const ls0=lsSnap(),V=api.vivo,A=api.ATIVOS.find(x=>x.id==='AAPL'),n0=A.pts.length,L=A.pts[n0-1],iso=t=>new Date(t).toISOString().slice(0,10),D1=iso(L[0]+864e5),h=new Date(G.gen+36e5).toISOString(),p1=+(L[1]*1.02).toFixed(2);
+  const pay=(em,c,erro)=>({versao:1,obtidoEm:new Date(em).toISOString(),fonte:'Yahoo Finance',cotacoes:c,ignorados:[],erro:erro||null});
+  ok('live prices: the page knows the local process (127.0.0.1, the port from the data)',V.VIVO&&V.VIVO.url==='http://127.0.0.1:1'&&/^[a-z0-9]{8,20}$/.test(V.VIVO.id),JSON.stringify(V.VIVO));
+  let n=V.aplica(pay(G.gen+36e5,{AAPL:{preco:p1,hora:h,dia:D1,parcial:true,moeda:'USD'}}));V.redesenha();
+  ok('live price: added as a new point on its exchange day, marked live (session open)',n===1&&A.pts.length===n0+1&&A.pts[n0][1]===p1&&A.parcial===true&&A.hora===h,JSON.stringify({n,len:A.pts.length,n0,last:A.pts[A.pts.length-1]}));
+  const card=document.querySelector('.tk[data-tk="AAPL"]');
+  ok('live price: the Apple card shows the new price and "live" with its time',card&&card.querySelector('.tk-price').textContent.includes(api.nf(p1,2))&&/live \d{1,2}:\d{2}/.test(txt('.tk[data-tk="AAPL"] .asof')),card&&card.textContent);
+  ok('live price: the same answer again changes nothing',V.aplica(pay(G.gen+36e5,{AAPL:{preco:+(p1*1.01).toFixed(2),hora:h,dia:D1,parcial:true,moeda:'USD'}}))===0&&A.pts[n0][1]===p1);
+  const p2=+(L[1]*1.03).toFixed(2);V.aplica(pay(G.gen+72e5,{AAPL:{preco:p2,hora:h,dia:D1,parcial:false,moeda:'USD'}}));
+  ok('live price: a later quote on the same day replaces that point (no duplicate day); after the close it is no longer partial',A.pts.length===n0+1&&A.pts[n0][1]===p2&&A.parcial===false,JSON.stringify(A.pts.slice(-2)));
+  let em=G.gen+1e7;
+  [['an older day',{preco:p2,hora:h,dia:iso(L[0]-864e5),moeda:'USD'}],['a price 60% away from the previous close',{preco:+(p2*1.6).toFixed(2),hora:h,dia:D1,moeda:'USD'}],['another currency',{preco:p2,hora:h,dia:D1,moeda:'EUR'}],
+   ['a zero price',{preco:0,hora:h,dia:D1,moeda:'USD'}],['a missing price',{preco:null,hora:h,dia:D1,moeda:'USD'}],['an invalid date',{preco:p2,hora:h,dia:'2026-13-45',moeda:'USD'}],['no time',{preco:p2,dia:D1,moeda:'USD'}],
+   ['a day 8 days after the series (the change would span several sessions)',{preco:p2,hora:h,dia:iso(L[0]+9*864e5),moeda:'USD'}]].forEach(([nm,q])=>{em+=6e4;const b=JSON.stringify(A.pts.slice(-2));const r=V.aplica(pay(em,{AAPL:q}));
+   ok('live price refused: '+nm,r===0&&JSON.stringify(A.pts.slice(-2))===b,JSON.stringify(A.pts.slice(-2)));});
+  const pf=api.pfDados().find(x=>x.id==='AAPL'),fxD=api.fxAt(A.pts[A.pts.length-1][0]);
+  ok('live price: the portfolio values Apple at the live price, in euros at the rate of that day',pf&&fxD&&near(pf.p,p2/fxD)&&near(pf.v,2*p2/fxD),JSON.stringify({p:pf&&pf.p,want:fxD&&p2/fxD}));
+  const F=api.fx().FX,nf0=F.length,fl=F[nf0-1],fx1=+(fl[1]*1.001).toFixed(4);
+  V.aplica(pay(em+=6e4,{FX:{preco:fx1,hora:h,dia:iso(fl[0]+864e5),parcial:true,moeda:'USD'}}));V.redesenha();
+  ok('live EUR/USD: joins the rate series and its card shows "live"',api.fx().FX.length===nf0+1&&api.fx().FX[nf0][1]===fx1&&/live \d{1,2}:\d{2}/.test(txt('.tk[data-tk="FX"] .asof')),txt('.tk[data-tk="FX"] .asof'));
+  const B=api.ATIVOS.find(x=>x.id==='BTC'),bl=B.pts[B.pts.length-1],bp=Math.round(bl[1]*1.01);
+  V.aplica(pay(em+=6e4,{BTC:{preco:bp,hora:h,dia:iso(bl[0]+864e5),parcial:true,moeda:'EUR'}}));V.redesenha();
+  const bc=document.querySelector('.tk[data-tk="BTC"] .chg');
+  ok('live Bitcoin: the CoinGecko 24 h change (from the run) is no longer shown next to a newer price; the card shows the change since 00:00 UTC',B.pts[B.pts.length-1][1]===bp&&bc&&/since 00:00 UTC/.test(bc.getAttribute('title')||''),bc&&bc.getAttribute('title'));
+  ok('live prices: the time the prices refer to moves forward (freshness counts from it)',V.tPrecos()===em,new Date(V.tPrecos()).toISOString());
+  V.set({ja:true,falhas:0});V.estado();const sv=()=>txt('#vivoEst');
+  ok('live status: "Live prices, updated" with the time of the latest update',/^Live prices, updated \d{1,2}:\d{2}$/.test(sv()),sv());
+  V.aplica(pay(em,{},'HTTP 429'));V.estado();
+  ok('live status: the source not answering is said, with the time of the prices still shown',/source is not answering \(latest from \d{1,2}:\d{2}\)/.test(sv()),sv());
+  V.aplica(pay(em+6e4,{AAPL:{preco:p2,hora:h,dia:D1,parcial:false,moeda:'USD'}}));
+  V.set({falhas:3});V.estado();ok('live status: the process stopped answering',/^Live prices stopped at \d{1,2}:\d{2}$/.test(sv()),sv());
+  V.set({ja:false,falhas:1});V.estado();ok('live status: connecting while the process starts',/connecting/.test(sv()),sv());
+  V.set({ja:false,falhas:30});V.estado();ok('live status: off, saying how to turn it on',sv()==='Live prices off'&&/desktop shortcut/.test(($('#vivoEst')||{}).title||''),sv());
+  ok('live prices: nothing is written to the browser storage (the register is untouched)',lsSnap()===ls0);}},
+ /* um ativo que as atualizações ao minuto não alcançam passa a atrasado, contado a partir da última atualização */
+ livestale:{prep(d){d.vivo={porta:1};G.gen=Date.parse(d.geradoEm);},test(api){
+  const V=api.vivo,em=G.gen+5*864e5,B=api.ATIVOS.find(x=>x.id==='BTC'),bl=B.pts[B.pts.length-1],N=api.ATIVOS.find(x=>x.id==='NVDA'),f0=api.frescura('NVDA',N.pts);
+  const n=V.aplica({versao:1,obtidoEm:new Date(em).toISOString(),cotacoes:{BTC:{preco:bl[1],hora:new Date(em).toISOString(),dia:new Date(em).toISOString().slice(0,10),parcial:true,moeda:'EUR'}},erro:null});
+  const f1=api.frescura('NVDA',N.pts);
+  ok('live prices: NVIDIA not updated for 5 days while Bitcoin is: NVIDIA is shown as behind, and its alert says so',n===1&&f1&&f1.velho&&f1.falta>=2&&api.alerts().some(a=>a.co==='NVDA'&&/behind/.test(a.txt)),JSON.stringify({n,f0,f1}));}},
+ nolive:{test(api){ok('without the live port in the data (Archive copies, test pages): no live status and no requests',!api.vivo.VIVO&&!document.querySelector('#vivoEst'));}},
  corrupt:{raw:'{"geradoEm": broken',after(){ok('unreadable data: the page says so instead of going blank',/could not be read/.test(txt('#main .callout')),txt('#main .callout'));}}
 };
 const sc=SC[S];
