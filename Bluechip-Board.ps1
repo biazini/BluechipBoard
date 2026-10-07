@@ -64,8 +64,11 @@ try {
     if ($protocolo -ne 0 -and -not ($protocolo -band 3072)) { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]($protocolo -bor 3072) }
 } catch { }
 
-# Browser identity sent to news and price sites (some refuse non-browser clients). Update the Chrome version now and then.
-$Script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+# Browser identity sent to news and price sites (some refuse non-browser clients). Update the Chrome version now and then:
+# $Script:UAChrome is the major version and $Script:UAData the day it was current (Chrome ships a new one every 4 weeks), so a
+# maintenance reminder appears when it is about 8 versions behind.
+$Script:UAChrome = 154; $Script:UAData = '2026-10-07'
+$Script:UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$($Script:UAChrome).0.0.0 Safari/537.36"
 $Script:Inv = [Globalization.CultureInfo]::InvariantCulture
 $Script:Agora = [DateTimeOffset]::UtcNow
 $Script:Fontes = New-Object System.Collections.Generic.List[object]
@@ -75,9 +78,10 @@ $Script:Fontes = New-Object System.Collections.Generic.List[object]
 # ============================================================================
 
 $Ativos = @(
-    @{ Id = 'AAPL';  Nome = 'Apple';    Yahoo = 'AAPL';    Stooq = 'aapl.us'; Moeda = 'USD' },
-    @{ Id = 'NVDA';  Nome = 'NVIDIA';   Yahoo = 'NVDA';    Stooq = 'nvda.us'; Moeda = 'USD' },
-    @{ Id = 'GOOGL'; Nome = 'Alphabet'; Yahoo = 'GOOGL';   Stooq = 'googl.us'; Moeda = 'USD' },
+    # Nasdaq: alternativa ao Yahoo para o preço de 1 ano (validada contra a execução anterior; ver Get-SerieNasdaq)
+    @{ Id = 'AAPL';  Nome = 'Apple';    Yahoo = 'AAPL';    Stooq = 'aapl.us'; Nasdaq = 'AAPL';  Moeda = 'USD' },
+    @{ Id = 'NVDA';  Nome = 'NVIDIA';   Yahoo = 'NVDA';    Stooq = 'nvda.us'; Nasdaq = 'NVDA';  Moeda = 'USD' },
+    @{ Id = 'GOOGL'; Nome = 'Alphabet'; Yahoo = 'GOOGL';   Stooq = 'googl.us'; Nasdaq = 'GOOGL'; Moeda = 'USD' },
     @{ Id = 'SXR8';  Nome = 'iShares Core S&P 500 (SXR8)'; Yahoo = 'SXR8.DE'; Stooq = 'sxr8.de'; Moeda = 'EUR' },
     # Outros ETF da iShares, na Xetra em euros (a mesma bolsa e moeda do SXR8). Metadados e holdings em $ETFs, abaixo.
     @{ Id = 'EUNK';  Nome = 'iShares Core MSCI Europe (EUNK)'; Yahoo = 'EUNK.DE'; Stooq = ''; Moeda = 'EUR' },
@@ -390,6 +394,22 @@ $TierCuidado   = 'motley fool|fool\.com|24/7 wall|247wallst|seeking alpha|seekin
 
 function Write-Passo([string]$Texto) { Write-Host "  • $Texto" -ForegroundColor Cyan }
 
+# E-mail de contacto da SEC quando não vem em -EmailSEC: a variável de ambiente BLUECHIP_SEC_EMAIL ou, se estiver vazia,
+# bluechip-board.config.json na pasta do script ({ "secEmail": "…" }, fora do git). Assim a tarefa agendada e o lançador
+# não o precisam de ter nos argumentos (que ficam visíveis no Agendador de Tarefas e na lista de processos).
+# Devolve o e-mail (ou '') e um aviso quando o ficheiro existe mas não tem um e-mail válido.
+function Get-EmailSecLocal([string]$PastaScript) {
+    $origem = 'BLUECHIP_SEC_EMAIL'; $e = "$env:BLUECHIP_SEC_EMAIL".Trim(); $aviso = ''
+    $cfg = Join-Path $PastaScript 'bluechip-board.config.json'
+    if (-not $e -and (Test-Path -LiteralPath $cfg)) {
+        $origem = 'bluechip-board.config.json'
+        try { $e = "$((Get-Content -LiteralPath $cfg -Raw -Encoding UTF8 | ConvertFrom-Json).secEmail)".Trim() }
+        catch { $aviso = "bluechip-board.config.json could not be read ($($_.Exception.Message)): running without the SEC sources." }
+    }
+    if ($e -and ($e -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$' -or $e -eq 'your@email.com')) { $aviso = "The SEC e-mail in $origem is not valid: running without the SEC sources."; $e = '' }
+    [pscustomobject]@{ email = $e; aviso = $aviso }
+}
+
 function Get-Url {
     param([string]$Url, [string]$UserAgent = $Script:UA, [int]$Timeout = 25)
     $ultimoErro = $null
@@ -402,9 +422,12 @@ function Get-Url {
             return (ConvertFrom-Bytes $r.RawContentStream.ToArray() "$($r.Headers['Content-Type'])")
         } catch {
             $ultimoErro = $_
+            $codigo = 0; try { $codigo = [int]$_.Exception.Response.StatusCode } catch { }
+            # a permanent answer (bad request, unauthorised, forbidden, not found, gone) does not change a few seconds later:
+            # no second attempt, so a dead source does not slow the run down
+            if ($codigo -in 400, 401, 403, 404, 410) { break }
             if ($tentativa -lt 2) {
                 # rate limit or temporary overload (429/503): wait longer before the second attempt
-                $codigo = 0; try { $codigo = [int]$_.Exception.Response.StatusCode } catch { }
                 Start-Sleep -Seconds $(if ($codigo -eq 429 -or $codigo -eq 503) { 8 } else { 2 })
             }
         }
@@ -524,35 +547,36 @@ function Read-Feed {
 # Classifica uma notícia: empresas, temas, nível de impacto, sentimento e tipo de fonte
 function Measure-Noticia($N) {
     $txt = "$($N.titulo)"
-    $emp = New-Object System.Collections.Generic.List[string]
-    foreach ($k in $EmpresasRe.Keys) { if ($txt -match $EmpresasRe[$k]) { $emp.Add($k) } }
+    # (listas do PowerShell e operadores -ccontains, sensíveis a maiúsculas como List.Contains: no PowerShell 7 cada
+    # chamada a um método .NET custa ~10 µs, ver $DupVazias)
+    $emp = @(foreach ($k in $EmpresasRe.Keys) { if ($txt -match $EmpresasRe[$k]) { $k } })
     # Without a keyword, the story goes to the feed's asset. Aggregated feeds (Google News, Yahoo Finance) return many
     # general stories ("China's AI agents…" in an Apple search), so there this is only a weak match: no company bonus
     # and at most "moderate". Primary feeds (newsrooms, SEC, Fed, ECB) keep the full assignment.
-    $soPeloFeed = $false; $viaPosicao = New-Object System.Collections.Generic.List[string]
-    if ($emp.Count -eq 0 -and $N.dica) { $emp.Add($N.dica); $soPeloFeed = ("$($N.feed)" -match '^(Google News|Yahoo Finance)') }
+    $soPeloFeed = $false; $viaPosicao = @()
+    if ($emp.Count -eq 0 -and $N.dica) { $emp = @("$($N.dica)"); $soPeloFeed = ("$($N.feed)" -match '^(Google News|Yahoo Finance)') }
     # Sem palavra de nenhum ativo e num feed sem ativo próprio (feeds gerais, que antes deixavam cair a notícia): uma das
     # maiores posições de um fundo ($AliasesPosicoes) liga a notícia a esse fundo, como correspondência fraca (no máximo
     # "moderada", sem bónus). Os feeds com ativo próprio mantêm a atribuição de sempre.
     if ($emp.Count -eq 0) {
         foreach ($f in $AliasesPosicoes.Keys) {
             foreach ($a in @($AliasesPosicoes[$f])) {
-                if ($a -and $txt -match $a.Re) { if (-not $emp.Contains($f)) { $emp.Add($f) }; if (-not $viaPosicao.Contains($a.Nome)) { $viaPosicao.Add($a.Nome) } }
+                if ($a -and $txt -match $a.Re) { if ($emp -cnotcontains $f) { $emp += "$f" }; if ($viaPosicao -cnotcontains $a.Nome) { $viaPosicao += "$($a.Nome)" } }
             }
         }
     }
     if ($emp.Count -eq 0) { return $null }
-    if ($N.exigir -and -not $emp.Contains($N.exigir)) { return $null }   # feed temático: o título tem de ser sobre o ativo
-    if ($emp.Contains('SXR8') -and -not $emp.Contains('MKT')) { $emp.Add('MKT') }
+    if ($N.exigir -and $emp -cnotcontains $N.exigir) { return $null }   # feed temático: o título tem de ser sobre o ativo
+    if ($emp -ccontains 'SXR8' -and $emp -cnotcontains 'MKT') { $emp += 'MKT' }
 
     # Themes: the strongest counts in full and each extra one at half, up to 5 points. (Adding them all, up to 7,
     # let a headline that merely mentions AI, chips and China reach "material" with no adverse event.)
-    $achados = New-Object System.Collections.Generic.List[string]
-    $pesos = New-Object System.Collections.Generic.List[double]
-    foreach ($t in $Temas) { if ($txt -match $t.Re) { $achados.Add($t.Nome); $pesos.Add($t.Peso) } }
-    if ($N.extraTema -and -not $achados.Contains($N.extraTema)) { $achados.Insert(0, $N.extraTema); $pesos.Add($N.extraPeso) }
-    $score = 0.0; $i = 0
-    foreach ($w in @($pesos | Sort-Object -Descending)) { $score += $(if ($i -eq 0) { $w } else { $w / 2 }); $i++ }
+    $achados = @(); $pesos = @()
+    foreach ($t in $Temas) { if ($txt -match $t.Re) { $achados += "$($t.Nome)"; $pesos += [double]$t.Peso } }
+    if ($N.extraTema -and $achados -cnotcontains $N.extraTema) { $achados = @("$($N.extraTema)") + $achados; $pesos += [double]$N.extraPeso }
+    # o mais forte conta inteiro e cada um dos outros a metade (= máximo + (soma − máximo) ÷ 2; os pesos são múltiplos de 0,5)
+    $score = 0.0
+    if ($pesos.Count) { $mx = $pesos[0]; $soma = 0.0; foreach ($w in $pesos) { $soma += $w; if ($w -gt $mx) { $mx = $w } }; $score = $mx + ($soma - $mx) / 2 }
     if ($score -gt 5) { $score = 5 }
     $eSevero = $txt -match $Severo
     if ($eSevero) { $score += 3 }
@@ -562,7 +586,8 @@ function Measure-Noticia($N) {
     $src = ('{0} {1}' -f $N.fonte, $N.dominio).ToLowerInvariant()
     $tier = if ($src -match $TierPrimaria) { 'primaria' } elseif ($src -match $TierCuidado) { 'cuidado' } elseif ($src -match $TierReferencia) { 'referencia' } else { 'outra' }
     switch ($tier) { 'primaria' { $score += 1.5 } 'referencia' { $score += 1 } 'cuidado' { $score -= 1.5 } }
-    if (-not $soPeloFeed -and -not $viaPosicao.Count -and @($emp | Where-Object { $_ -in 'AAPL', 'NVDA', 'GOOGL', 'BTC' }).Count -gt 0) { $score += 1 }
+    $bonus = $false; foreach ($e in $emp) { if ($e -in 'AAPL', 'NVDA', 'GOOGL', 'BTC') { $bonus = $true } }
+    if (-not $soPeloFeed -and -not $viaPosicao.Count -and $bonus) { $score += 1 }
     if ($eRuido) { $score -= 3 }
 
     $nivel = if ($eRuido -and $tier -ne 'primaria') { 'white' } elseif ($score -ge 7) { 'red' } elseif ($score -ge 4) { 'orange' } elseif ($score -ge 2) { 'yellow' } else { 'white' }
@@ -615,6 +640,7 @@ function ConvertTo-IsoUtc($Valor) {
 # pessoais. Escrito no fim da execução, depois do vistos.json (uma execução que falha a meio não o altera).
 # ----------------------------------------------------------------------------
 $HistoricoDias = 400
+$HistoricoMax = 15000   # notícias no máximo (hoje entram ~20 por dia: ~8 000 em 400 dias)
 function ConvertTo-NoticiaHistorico($N) {
     if (-not $N) { return $null }
     $d = ConvertTo-IsoUtc $N.data; $t = "$($N.titulo)"
@@ -657,7 +683,15 @@ function Merge-HistoricoNoticias($Historico, $Noticias, [DateTimeOffset]$Agora, 
     }
     $inicio = if ($Historico.inicio) { $Historico.inicio } else { ConvertTo-IsoUtc $Agora }
     if ((ConvertTo-Data $inicio) -lt $corte) { $inicio = ConvertTo-IsoUtc $corte }
-    [pscustomobject]@{ inicio = $inicio; itens = @($porChave.Values | Sort-Object data); estado = $Historico.estado; aviso = $Historico.aviso }
+    $itens = @($porChave.Values | Sort-Object data, chave)
+    # Limite de segurança ($HistoricoMax notícias, cerca de 2 anos ao ritmo de hoje): o ficheiro vai para o site e para cada
+    # cópia do Archive, e o Windows PowerShell 5.1 lê-o inteiro. Acima dele ficam as mais recentes, e o início passa a ser a
+    # data da mais antiga que ficou (o site nunca diz que o histórico começa antes do que tem).
+    if ($itens.Count -gt $HistoricoMax) {
+        $itens = @($itens | Select-Object -Last $HistoricoMax)
+        $inicio = $itens[0].data
+    }
+    [pscustomobject]@{ inicio = $inicio; itens = $itens; estado = $Historico.estado; aviso = $Historico.aviso }
 }
 
 # ----------------------------------------------------------------------------
@@ -667,11 +701,13 @@ function Merge-HistoricoNoticias($Historico, $Noticias, [DateTimeOffset]$Agora, 
 # aceitação que o EDGAR mostra). Sem hora verificada, a hora e a sessão ficam vazias: nunca se inventam.
 # ----------------------------------------------------------------------------
 $Script:FusoNY = $null
+$MaxCabecalhos = 12   # pedidos de cabeçalhos de entregas do EDGAR por empresa e execução (só para 8-K ainda sem hora)
 function Get-FusoNY { if (-not $Script:FusoNY) { $Script:FusoNY = [TimeZoneInfo]::FindSystemTimeZoneById('Eastern Standard Time') }; return $Script:FusoNY }
 # Primeira sessão em $Data ou depois (ou só depois, com -Depois). $Sessoes: datas com fecho no histórico da empresa,
 # por ordem; para além do fim do histórico, os dias úteis sem os feriados indicados.
 function Get-ProximaSessao([string]$Data, [bool]$Depois, [string[]]$Sessoes, [string[]]$Feriados) {
-    if ($Sessoes -and $Sessoes.Count -and [string]::CompareOrdinal($Data, $Sessoes[-1]) -le 0) {
+    # dentro do período do histórico: as datas do histórico (antes do seu início, ou depois do fim, os dias úteis)
+    if ($Sessoes -and $Sessoes.Count -and [string]::CompareOrdinal($Data, $Sessoes[-1]) -le 0 -and [string]::CompareOrdinal($Data, $Sessoes[0]) -ge 0) {
         $i = [Array]::BinarySearch($Sessoes, $Data, [StringComparer]::Ordinal)
         $k = if ($i -ge 0) { $(if ($Depois) { $i + 1 } else { $i }) } else { -bnot $i }
         if ($k -lt $Sessoes.Count) { return $Sessoes[$k] }
@@ -689,13 +725,31 @@ function Get-ProximaSessao([string]$Data, [bool]$Depois, [string[]]$Sessoes, [st
 # das 16:00, a sessão seguinte; antes das 09:30, a própria sessão; durante a sessão, a própria sessão, com nota.
 function Get-SessaoReacao([DateTimeOffset]$Aceite, [string[]]$Sessoes = @(), [string[]]$Feriados = @()) {
     $ny = [TimeZoneInfo]::ConvertTime($Aceite, (Get-FusoNY))
-    $min = $ny.Hour * 60 + $ny.Minute
+    $min = $ny.Hour * 60 + $ny.Minute; $dia = $ny.ToString('yyyy-MM-dd', $Script:Inv)
     $quando = if ($min -ge 960) { 'after' } elseif ($min -lt 570) { 'before' } else { 'during' }
-    $sessao = Get-ProximaSessao $ny.ToString('yyyy-MM-dd', $Script:Inv) ($quando -eq 'after') $Sessoes $Feriados
+    # num dia sem sessão (fim de semana ou feriado, por exemplo a Sexta-feira Santa, em que a SEC recebe entregas) não
+    # há "durante" nem "depois do fecho": a reação é a sessão seguinte
+    if ((Get-ProximaSessao $dia $false $Sessoes $Feriados) -ne $dia) { $quando = 'closed' }
+    $sessao = Get-ProximaSessao $dia ($quando -eq 'after') $Sessoes $Feriados
     [pscustomobject]@{
         horaNY = $ny.ToString('yyyy-MM-dd HH:mm', $Script:Inv); quando = $quando; sessao = $sessao
-        nota = $(if ($quando -eq 'during') { 'Accepted during the session (09:30-16:00 New York): the reaction is counted from that same session.' } else { '' })
+        nota = $(if ($quando -eq 'during') { 'Accepted during the session (09:30-16:00 New York): the reaction is counted from that same session.' } elseif ($quando -eq 'closed') { 'Accepted on a day the exchange was closed: the reaction is counted from the next session.' } else { '' })
     }
+}
+# Hora de aceitação de uma entrega pelo cabeçalho do próprio arquivo do EDGAR (…-index-headers.html, "ACCEPTANCE-DATETIME",
+# em hora de Nova Iorque): a fonte oficial para as entregas que já não estão no feed Atom (só as 40 mais recentes) ou se o
+# feed deixar de existir. Devolve a hora em UTC, ou $null (sem a confirmar, nada é inventado).
+function Get-AceiteCabecalho([string]$Cik, [string]$Acc, [string]$UserAgent) {
+    if ($Acc -notmatch '^\d{10}-\d{2}-\d{6}$') { return $null }
+    $u = "https://www.sec.gov/Archives/edgar/data/$([int64]$Cik)/$($Acc -replace '-', '')/$Acc-index-headers.html"
+    $t = Get-Url $u -UserAgent $UserAgent
+    if ($t -notmatch "<ACCESSION-NUMBER>\s*$([regex]::Escape($Acc))\b") { throw "the EDGAR header is not for $Acc" }
+    $m = [regex]::Match($t, '<ACCEPTANCE-DATETIME>\s*(\d{14})\b')
+    if (-not $m.Success) { return $null }
+    $local = [datetime]::ParseExact($m.Groups[1].Value, 'yyyyMMddHHmmss', $Script:Inv)
+    $fuso = Get-FusoNY
+    if ($fuso.IsInvalidTime($local)) { return $null }
+    return [DateTimeOffset]::new($local, $fuso.GetUtcOffset($local)).ToUniversalTime()
 }
 # $Conhecidas: número de acesso → hora de aceitação já verificada numa execução anterior (as entregas não mudam)
 function Get-ResultadosSEC([hashtable]$Empresa, [string]$UserAgent, [string[]]$Sessoes = @(), [string[]]$Feriados = @(), [hashtable]$Conhecidas = @{}) {
@@ -729,6 +783,15 @@ function Get-ResultadosSEC([hashtable]$Empresa, [string]$UserAgent, [string[]]$S
             }
             if (-not $horas.Count) { $erroHoras = 'no entries in the 8-K feed' }
         } catch { $erroHoras = $_.Exception.Message }
+        # sem hora no feed nem numa execução anterior: o cabeçalho da entrega no arquivo do EDGAR (no máximo $MaxCabecalhos
+        # pedidos por empresa e execução, 400 ms entre eles; as horas encontradas ficam guardadas e não voltam a ser pedidas)
+        $doCab = 0; $erroCab = ''; $pedidos = 0
+        foreach ($o in $oitos) {
+            if ($horas.ContainsKey($o.acc) -or $Conhecidas.ContainsKey($o.acc)) { continue }
+            if ($pedidos -ge $MaxCabecalhos) { break }
+            $pedidos++; Start-Sleep -Milliseconds 400
+            try { $tc = Get-AceiteCabecalho $cik $o.acc $UserAgent; if ($tc) { $horas[$o.acc] = $tc; $doCab++ } } catch { $erroCab = $_.Exception.Message }
+        }
         $semHora = 0
         $lista = @(foreach ($o in $oitos) {
             $t = if ($horas.ContainsKey($o.acc)) { $horas[$o.acc] } elseif ($Conhecidas.ContainsKey($o.acc)) { ConvertTo-Data "$($Conhecidas[$o.acc])" } else { $null }
@@ -737,10 +800,15 @@ function Get-ResultadosSEC([hashtable]$Empresa, [string]$UserAgent, [string[]]$S
                 [pscustomobject]@{ acc = $o.acc; entrega = $o.entrega; aceite = (ConvertTo-IsoUtc $t); horaNY = $s.horaNY; quando = $s.quando; sessao = $s.sessao; nota = $s.nota }
             } else {
                 $semHora++
-                [pscustomobject]@{ acc = $o.acc; entrega = $o.entrega; aceite = $null; horaNY = $null; quando = $null; sessao = $null; nota = 'Acceptance time unavailable (not in the EDGAR 8-K feed): no reaction session.' }
+                [pscustomobject]@{ acc = $o.acc; entrega = $o.entrega; aceite = $null; horaNY = $null; quando = $null; sessao = $null; nota = 'Acceptance time unavailable (not in the EDGAR 8-K feed or the filing header): no reaction session.' }
             }
         })
-        $nota = if ($erroHoras) { "acceptance times: $erroHoras" } elseif ($semHora) { "$semHora older 8-K without an acceptance time" } else { '' }
+        $notas = @()
+        if ($erroHoras) { $notas += "8-K feed: $erroHoras" }
+        if ($doCab) { $notas += "$doCab acceptance time(s) from the EDGAR filing headers" }
+        if ($erroCab) { $notas += "filing headers: $erroCab" }
+        if ($semHora) { $notas += "$semHora 8-K without an acceptance time" }
+        $nota = $notas -join '; '
         Add-Fonte $nome 'sec' $u 'ok' $lista.Count $sw.ElapsedMilliseconds $nota
         return [pscustomobject]@{ id = $Empresa.Id; estado = 'ok'; fonte = 'SEC EDGAR'; obtidoEm = $Script:Agora.ToString('o'); resultados = $lista; ultimoRelatorio = $ultimo; erro = ''; nota = $nota }
     } catch {
@@ -903,6 +971,15 @@ function Get-SerieMacro([hashtable]$S) {
         return [pscustomobject]@{ id = $S.Id; nome = $S.Nome; estado = 'error'; fonte = ''; obtidoEm = $Script:Agora.ToString('o'); freq = $S.Chave.Substring(0, 1); pontos = @(); erro = $_.Exception.Message }
     }
 }
+# Lembrete de manutenção: a versão do Chrome no User-Agent ($Script:UAChrome, atual em $Script:UAData) com cerca de 8 versões
+# de atraso (uma a cada 4 semanas). Um navegador muito antigo é mais facilmente recusado pelos sites.
+function Get-LembreteUA([int]$Versao, [string]$Desde, [DateTimeOffset]$Agora) {
+    $d = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($Desde, 'yyyy-MM-dd', $Script:Inv, [Globalization.DateTimeStyles]::None, [ref]$d)) { return "The date of the browser identity (`$Script:UAData = '$Desde') is not yyyy-MM-dd." }
+    $atraso = [int][math]::Floor(($Agora.UtcDateTime - $d).TotalDays / 28)
+    if ($atraso -lt 8) { return $null }
+    return "The browser identity sent to the sites says Chrome $Versao, about $atraso versions behind the current Chrome (a new one every 4 weeks): set `$Script:UAChrome to the current version and `$Script:UAData to today."
+}
 # Lembrete de manutenção: sem uma decisão da Fed, ou do BCE, a mais de 60 dias no calendário manual
 function Get-LembreteReunioes($Cal, [DateTimeOffset]$Agora) {
     $lim = $Agora.UtcDateTime.Date.AddDays(60); $falta = @()
@@ -940,7 +1017,7 @@ function Get-FundamentaisEmpresa([hashtable]$Empresa, [string]$UserAgent, $Split
     } else { $erro = 'Run with -EmailSEC "your@email.com" to enable it: the SEC requires a contact in each request.' }
     $quando = if ($Anterior) { ConvertTo-Data (ConvertTo-IsoUtc $Anterior.obtidoEm) } else { $null }
     if ($Anterior -and "$($Anterior.estado)" -in 'ok', 'previous run' -and $quando -and ($Script:Agora - $quando).TotalDays -le 120) {
-        return (& $copia $Anterior 'previous run' "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))" $erro '')
+        return (& $copia $Anterior 'previous run' "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))" $erro '')
     }
     return [pscustomobject]@{ id = $Empresa.Id; estado = $(if ($UserAgent) { 'error' } else { 'skipped' }); fonte = ''; obtidoEm = $Script:Agora.ToString('o'); relatorio = $null; tags = $null; faltam = $null; trimestres = @(); ttm = $null; erro = $erro; nota = '' }
 }
@@ -959,7 +1036,10 @@ $DupVazias = @('a','an','the','and','or','but','of','to','in','on','at','for','w
     'de','da','do','das','dos','e','o','os','as','um','uma','uns','umas','em','no','na','nos','nas','por','para','com','sem','que','se','ao','aos','sao','foi','como','mais','menos','sobre',
     'vs','via','here','there','their','his','her','he','she','they','we','you','your','our','us','watch','update','exclusive','breaking','video','live','analysis','opinion',
     'stock','stocks','share','shares','acoes','acao','today','hoje','best','top','guide','ranking','things','ways','reasons')
-$DupVazias = New-Object 'System.Collections.Generic.HashSet[string]' (,[string[]]$DupVazias)
+# Tabela do PowerShell consultada pelo índice ($DupVazias[$w]), não um HashSet: no PowerShell 7 cada chamada a um método
+# .NET (HashSet.Contains, List.Add, String.EndsWith…) passa pelo registo AMSI do Windows e custa cerca de 10 µs, o que nos
+# ciclos sobre milhares de palavras somava segundos. Os índices e os operadores (-match, -replace) não têm esse custo.
+$vaziasH = @{}; foreach ($w in $DupVazias) { $vaziasH[$w] = $true }; $DupVazias = $vaziasH
 $DupSinonimos = @{}
 foreach ($grupo in @(
         @('launch','unveil','announce','introduce','debut','release','roll','lanca','apresenta','anuncia'),
@@ -983,35 +1063,41 @@ function Get-PalavrasTitulo([string]$Titulo) {
     $s = $s -replace '\b(\d+(?:[.,]\d+)?)\s?(billion|bn|bilioes|mil milhoes)\b', '${1}b ' -replace '\b(\d+(?:[.,]\d+)?)\s?(million|mln|milhoes)\b', '${1}m '
     $s = $s -replace '(\d),(\d)', '$1.$2'
     $s = $s -replace '\s[-–—|]\s[^-–—|]{2,40}$', '' -replace '\s(por|by)\s(reuters|investing\.com)$', ''
-    $out = New-Object 'System.Collections.Generic.HashSet[string]'
-    foreach ($m in [regex]::Matches($s, '[a-z0-9][a-z0-9.\-]*')) {
-        $w = $m.Value.Trim('.', '-')
-        if (($w.Length -lt 2 -and $w -notmatch '^\d+$') -or $DupVazias.Contains($w)) { continue }
+    # Devolve as palavras distintas pela ordem em que aparecem (a ordem decide os empates do agrupamento). Só operadores e
+    # índices dentro do ciclo (ver $DupVazias): o sufixo sai com uma expressão regular equivalente ao ciclo anterior (o
+    # primeiro de ings, ing, edly, ed, es, s que deixe pelo menos 4 letras), as pontas "." e "-" com outra.
+    $vistas = @{}
+    $palavras = @(foreach ($m in [regex]::Matches($s, '[a-z0-9][a-z0-9.\-]*')) {
+        $w = $m.Value -replace '^[.\-]+|[.\-]+$', ''
+        if (($w.Length -lt 2 -and $w -notmatch '^\d+$') -or $DupVazias[$w]) { continue }
         if ($w -notmatch '\d') {
-            foreach ($suf in 'ings', 'ing', 'edly', 'ed', 'es', 's') {
-                if ($w.Length -gt $suf.Length + 3 -and $w.EndsWith($suf)) { $w = $w.Substring(0, $w.Length - $suf.Length); break }
-            }
-            if ($DupSinonimos.ContainsKey($w)) { $w = $DupSinonimos[$w] }
+            $w = $w -replace '^(.{4,}?)(?:ings|ing|edly|ed|es|s)$', '$1'
+            $sin = $DupSinonimos[$w]; if ($sin) { $w = $sin }
         }
-        [void]$out.Add($w)
-    }
-    return , $out
+        if (-not $vistas[$w]) { $vistas[$w] = $true; $w }
+    })
+    return , $palavras
 }
 
 function Join-NoticiasDuplicadas($Lista) {
-    $L = @($Lista | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true })
+    # desempate pela chave (o título normalizado, único): sem ele a ordem dos empates dependia da ordem da tabela de origem
+    # (aleatória entre execuções no PowerShell 7) e do algoritmo de ordenação (diferente no 5.1), e os grupos mudavam com ela
+    $L = @($Lista | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true }, @{ Expression = 'chave'; Descending = $false })
     $n = $L.Count
     if ($n -lt 2) { return $L }
-    $tok = New-Object object[] $n; $nums = New-Object object[] $n; $emp = New-Object object[] $n; $t = New-Object object[] $n
+    # (só índices e operadores nos ciclos: ver $DupVazias. $tokH[i] = as palavras do título i, para consultas pelo índice;
+    # $dia[i] = o instante em ticks, para comparar sem chamar métodos)
+    $tok = New-Object object[] $n; $tokH = New-Object object[] $n; $nums = New-Object object[] $n; $emp = New-Object object[] $n; $t = New-Object object[] $n; $dia = New-Object object[] $n
     $df = @{}; $post = @{}
     for ($i = 0; $i -lt $n; $i++) {
         $tok[$i] = Get-PalavrasTitulo $L[$i].titulo
-        $nums[$i] = @($tok[$i] | Where-Object { $_ -match '\d' })
-        $emp[$i] = @($L[$i].empresas | Where-Object { $_ -ne 'MKT' })
+        $th = @{}; foreach ($w in $tok[$i]) { $th[$w] = $true }; $tokH[$i] = $th
+        $nums[$i] = @(foreach ($w in $tok[$i]) { if ($w -match '\d') { $w } })
+        $emp[$i] = @(foreach ($e in @($L[$i].empresas)) { if ($e -ne 'MKT') { $e } })
         $t[$i] = if ($L[$i].data) { [DateTimeOffset]::Parse($L[$i].data, $Script:Inv) } else { $null }
+        $dia[$i] = if ($t[$i]) { $t[$i].UtcTicks } else { $null }
         foreach ($w in $tok[$i]) {
-            if ($df.ContainsKey($w)) { $df[$w]++ } else { $df[$w] = 1; $post[$w] = New-Object System.Collections.Generic.List[int] }
-            $post[$w].Add($i)
+            if ($df[$w]) { $df[$w]++; $post[$w] += , $i } else { $df[$w] = 1; $post[$w] = @($i) }
         }
     }
     $idf = @{}; foreach ($w in $df.Keys) { $idf[$w] = [math]::Log(($n + 1) / ($df[$w] + 0.5)) }
@@ -1022,15 +1108,15 @@ function Join-NoticiasDuplicadas($Lista) {
     # Medidas de semelhança entre duas notícias, ou $null quando não podem ser a mesma
     $medir = {
         param($a, $b)
-        if ($t[$a] -and $t[$b] -and [math]::Abs(($t[$a] - $t[$b]).TotalDays) -gt 3) { return $null }      # mais de 3 dias de distância
+        if ($null -ne $dia[$a] -and $null -ne $dia[$b] -and ($dia[$a] - $dia[$b] -gt 2592000000000 -or $dia[$b] - $dia[$a] -gt 2592000000000)) { return $null }      # mais de 3 dias de distância (em ticks: exato)
         if ($emp[$a].Count -and $emp[$b].Count) { $comum = $false; foreach ($e in $emp[$a]) { if ($emp[$b] -contains $e) { $comum = $true } }; if (-not $comum) { return $null } }   # empresas diferentes
         $soA = 0; foreach ($x in $nums[$a]) { if ($nums[$b] -notcontains $x) { $soA++ } }
         $soB = 0; foreach ($x in $nums[$b]) { if ($nums[$a] -notcontains $x) { $soB++ } }
         if ($soA -and $soB) { return $null }                                                               # números diferentes (datas, valores)
         $k = 0; $ms = 0.0; $nr = 0
-        foreach ($w in $tok[$a]) { if ($tok[$b].Contains($w)) { $k++; $ms += $idf[$w]; if ($df[$w] -le $raro) { $nr++ } } }
+        $hb = $tokH[$b]; foreach ($w in $tok[$a]) { if ($hb[$w]) { $k++; $ms += $idf[$w]; if ($df[$w] -le $raro) { $nr++ } } }
         if (-not $k) { return $null }
-        @{ n = $k; ms = $ms; nr = $nr; wj = $ms / ($massa[$a] + $massa[$b] - $ms); ov = $ms / [math]::Min($massa[$a], $massa[$b]) }
+        @{ n = $k; ms = $ms; nr = $nr; wj = $ms / ($massa[$a] + $massa[$b] - $ms); ov = $ms / $(if ($massa[$a] -lt $massa[$b]) { $massa[$a] } else { $massa[$b] }) }
     }
     $forte = { param($f) $f -and $f.n -ge 3 -and ($f.wj -ge 0.5 -or ($f.ov -ge 0.75 -and $f.wj -ge 0.3 -and $f.ms -ge 11 -and $f.n -ge 4) -or ($f.nr -ge 2 -and $f.ov -ge 0.6 -and $f.wj -ge 0.2 -and $f.n -ge 4)) }
     $fraca = { param($f) $f -and ($f.wj -ge 0.2 -or ($f.nr -ge 2 -and $f.ov -ge 0.5)) }
@@ -1038,11 +1124,12 @@ function Join-NoticiasDuplicadas($Lista) {
     # Pares candidatos: só os que partilham 3 ou mais palavras (índice invertido, evita comparar tudo com tudo)
     $viz = New-Object object[] $n
     for ($i = 0; $i -lt $n; $i++) { $viz[$i] = New-Object 'System.Collections.Generic.HashSet[int]' }
-    $conta = New-Object int[] $n
+    $conta = New-Object int[] $n; $tocados = New-Object int[] $n
     for ($i = 0; $i -lt $n; $i++) {
-        $tocados = New-Object System.Collections.Generic.List[int]
-        foreach ($w in $tok[$i]) { foreach ($j in $post[$w]) { if ($j -gt $i) { if ($conta[$j] -eq 0) { $tocados.Add($j) }; $conta[$j]++ } } }
-        foreach ($j in $tocados) {
+        $nt = 0   # $tocados[0..nt-1]: as notícias seguintes que partilham palavras com i, pela ordem em que aparecem
+        foreach ($w in $tok[$i]) { foreach ($j in $post[$w]) { if ($j -gt $i) { if ($conta[$j] -eq 0) { $tocados[$nt] = $j; $nt++ }; $conta[$j]++ } } }
+        for ($q = 0; $q -lt $nt; $q++) {
+            $j = $tocados[$q]
             if ($conta[$j] -ge 3 -and (& $forte (& $medir $i $j))) { [void]$viz[$i].Add($j); [void]$viz[$j].Add($i) }
             $conta[$j] = 0
         }
@@ -1110,9 +1197,54 @@ function Join-NoticiasDuplicadas($Lista) {
     return $saida.ToArray()
 }
 
+# Pontos isolados impossíveis: um fecho mais de 50 % acima (ou abaixo) dos dois vizinhos, quando os vizinhos concordam
+# entre si (até 10 %). É um erro do fornecedor (um "tick" errado), não um movimento: um desdobramento ou uma queda real
+# mudam o nível de forma duradoura e os vizinhos já não concordam. O último ponto não tem vizinho seguinte e fica sempre.
+function Remove-PicoIsolado($Pontos) {
+    $P = @($Pontos); $fora = 0
+    if ($P.Count -lt 3) { return [pscustomobject]@{ pontos = $P; removidos = 0 } }
+    $out = New-Object System.Collections.Generic.List[object]; $out.Add($P[0])
+    for ($i = 1; $i -lt $P.Count - 1; $i++) {
+        $a = [double]$out[$out.Count - 1][1]; $v = [double]$P[$i][1]; $b = [double]$P[$i + 1][1]
+        if ($a -gt 0 -and $b -gt 0 -and [math]::Abs($b / $a - 1) -le 0.10 -and (($v / $a -gt 1.5 -and $v / $b -gt 1.5) -or ($v / $a -lt 1 / 1.5 -and $v / $b -lt 1 / 1.5))) { $fora++; continue }
+        $out.Add($P[$i])
+    }
+    $out.Add($P[-1])
+    return [pscustomobject]@{ pontos = @(foreach ($x in $out) { , @($x[0], $x[1]) }); removidos = $fora }
+}
+
+# Alternativa ao Yahoo para as ações dos EUA: o histórico diário público da Nasdaq (o mesmo serviço das datas de resultados),
+# 1 ano, em USD. Só é aceite se coincidir com a série da execução anterior nas datas em comum (pelo menos 20, mediana
+# dentro de 1 % e cada data dentro de 3 %): assim um histórico com outro ajuste a desdobramentos, ou de outro título, nunca
+# passa por bom. Sem execução anterior para comparar, não é usado (nada é inventado). Uma sessão de hoje ainda aberta
+# (antes das 16:15 de Nova Iorque) fica de fora: não é um fecho.
+function Get-SerieNasdaq([hashtable]$Ativo, $Referencia) {
+    $u = "https://api.nasdaq.com/api/quote/$([uri]::EscapeDataString($Ativo.Nasdaq))/historical?assetclass=stocks&fromdate=$($Script:Agora.UtcDateTime.AddYears(-1).AddDays(-7).ToString('yyyy-MM-dd', $Script:Inv))&limit=9999&todate=$($Script:Agora.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv))"
+    $j = (Get-Url $u) | ConvertFrom-Json
+    if (-not $j.data) { throw "Nasdaq: $(@($j.status.bCodeMessage | ForEach-Object { $_.errorMessage }) -join ' ')".Trim() }
+    if ("$($j.data.symbol)" -ne $Ativo.Nasdaq) { throw "Nasdaq returned '$($j.data.symbol)' instead of $($Ativo.Nasdaq)" }
+    $porData = @{}; $inv = 0; $ny = [TimeZoneInfo]::ConvertTime($Script:Agora, (Get-FusoNY))
+    foreach ($l in @($j.data.tradesTable.rows)) {
+        $d = [datetime]::MinValue; $c = 0.0
+        if (-not $l -or -not [datetime]::TryParseExact("$($l.date)", 'MM/dd/yyyy', $Script:Inv, [Globalization.DateTimeStyles]::None, [ref]$d) -or
+            -not [double]::TryParse(("$($l.close)" -replace '[$,\s]', ''), [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$c) -or $c -le 0 -or [double]::IsInfinity($c)) { $inv++; continue }
+        $iso = $d.ToString('yyyy-MM-dd', $Script:Inv)
+        if ($iso -gt $ny.ToString('yyyy-MM-dd', $Script:Inv) -or ($iso -eq $ny.ToString('yyyy-MM-dd', $Script:Inv) -and ($ny.Hour * 60 + $ny.Minute) -lt 975)) { continue }
+        $porData[$iso] = [math]::Round($c, 4)
+    }
+    $pts = @(foreach ($k in @($porData.Keys | Sort-Object)) { , @($k, $porData[$k]) })
+    if ($pts.Count -lt 5) { throw 'Nasdaq returned no valid prices' }
+    $ref = @{}; foreach ($p in @($Referencia)) { $q = @($p); if ($q.Count -ge 2) { $ref["$($q[0])"] = [double]$q[1] } }
+    $razoes = @(foreach ($p in $pts) { if ($ref.ContainsKey($p[0]) -and $ref[$p[0]] -gt 0) { $p[1] / $ref[$p[0]] } })
+    if ($razoes.Count -lt 20) { throw "Nasdaq prices could not be checked against the previous run ($($razoes.Count) dates in common, at least 20 needed): not used" }
+    $ord = @($razoes | Sort-Object); $med = $ord[[math]::Floor(($ord.Count - 1) / 2)]
+    if ([math]::Abs($med - 1) -gt 0.01 -or @($razoes | Where-Object { [math]::Abs($_ - 1) -gt 0.03 }).Count) { throw ('Nasdaq prices do not match the previous run''s (median ratio {0}): not used' -f $med.ToString('0.####', $Script:Inv)) }
+    return [pscustomobject]@{ moeda = 'USD'; ultimo = $pts[-1][1]; pontos = $pts; fonte = 'Nasdaq'; splits = @(); parcial = $false; hora = $null; url = $u; invalidos = $inv }
+}
+
 # Série diária de 1 ano: Yahoo Finance (não oficial) com Stooq como alternativa.
 # Com -Desde (data Unix), devolve o histórico diário completo desde essa data, só do Yahoo (as alternativas não têm tanto histórico).
-function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
+function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0, $Referencia = $null) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $nome = if ($Desde) { "Price history: $($Ativo.Nome)" } else { "Prices: $($Ativo.Nome)" }
     try {
@@ -1131,7 +1263,7 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
         # que no verão são 23:00 UTC do dia anterior (em UTC as datas ficavam um dia atrasadas).
         $tzWin = @{ 'America/New_York' = 'Eastern Standard Time'; 'America/Chicago' = 'Central Standard Time'; 'Europe/London' = 'GMT Standard Time'; 'Europe/Berlin' = 'W. Europe Standard Time' }["$($res.meta.exchangeTimezoneName)"]
         $tzBolsa = $null; if ($tzWin) { try { $tzBolsa = [TimeZoneInfo]::FindSystemTimeZoneById($tzWin) } catch { } }
-        $diaBolsa = { param($instante) if ($tzBolsa) { [TimeZoneInfo]::ConvertTime($instante, $tzBolsa).ToString('yyyy-MM-dd') } else { $instante.AddSeconds([int]$res.meta.gmtoffset).UtcDateTime.ToString('yyyy-MM-dd') } }
+        $diaBolsa = { param($instante) if ($tzBolsa) { [TimeZoneInfo]::ConvertTime($instante, $tzBolsa).ToString('yyyy-MM-dd', $Script:Inv) } else { $instante.AddSeconds([int]$res.meta.gmtoffset).UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv) } }
         $porData = @{}; $invalidos = 0
         for ($i = 0; $i -lt $ts.Count; $i++) {
             if ($null -eq $cl[$i]) { continue }
@@ -1140,6 +1272,8 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
             $porData[(& $diaBolsa ([DateTimeOffset]::FromUnixTimeSeconds([int64]$ts[$i])))] = [math]::Round($v, 4)
         }
         $pts = @(foreach ($k in @($porData.Keys | Sort-Object)) { , @($k, $porData[$k]) })
+        # um ponto isolado muito fora dos vizinhos (erro do fornecedor, não um movimento real) sai e é contado
+        $limpo = Remove-PicoIsolado $pts; $pts = $limpo.pontos; $invalidos += $limpo.removidos
         if ($pts.Count -lt 5) { throw 'Empty series' }
         # Stock splits reported by Yahoo (its prices are already adjusted for them): the site uses them to keep
         # purchases registered before a split in the right number of shares
@@ -1161,8 +1295,23 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
             $sessao = $res.meta.currentTradingPeriod.regular; $ini = [int64]$sessao.start; $fim = [int64]$sessao.end; $hora = [int64]$res.meta.regularMarketTime
             if ($fim -gt 0 -and $hora -ge $ini -and $hora -lt $fim -and $Script:Agora.ToUnixTimeSeconds() -lt $fim) { $parcial = $true }
         } catch { }
+        # Depois do fecho, o Yahoo às vezes ainda não tem a vela diária dessa sessão (visto a 7 out 2026 à 01:17: séries até 5 out,
+        # com o fecho de 6 out só no regularMarketPrice/regularMarketTime). Com a sessão terminada, esse preço é o fecho oficial
+        # do dia: entra como último ponto, se for plausível (a 50 % do anterior), e a fonte diz de onde veio.
+        $notaFecho = ''
+        if (-not $parcial -and $res.meta.regularMarketTime) {
+            $tM = [DateTimeOffset]::FromUnixTimeSeconds([int64]$res.meta.regularMarketTime); $diaM = & $diaBolsa $tM; $pM = 0.0
+            if ([string]::CompareOrdinal($diaM, $pts[-1][0]) -gt 0 -and $tM -le $Script:Agora.AddMinutes(5) -and [double]::TryParse("$($res.meta.regularMarketPrice)", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$pM) -and $pM -gt 0 -and [math]::Abs($pM / [double]$pts[-1][1] - 1) -le 0.5) {
+                $notaFecho = "close of $diaM from the quote (the daily series ended on $($pts[-1][0]))"
+                $pts = @($pts) + @(, @($diaM, [math]::Round($pM, 4)))
+            }
+        }
         $horaUltimo = $null; if ($res.meta.regularMarketTime) { $horaUltimo = [DateTimeOffset]::FromUnixTimeSeconds([int64]$res.meta.regularMarketTime).ToString('o') }
-        Add-Fonte $nome 'prices' $u 'ok' $pts.Count $sw.ElapsedMilliseconds $(if ($invalidos) { "$invalidos invalid price(s) ignored" } else { '' })
+        # o último ponto não pode ser comparado com o seguinte: um salto enorme fica assinalado na fonte (não é apagado)
+        $notas = @(); if ($invalidos) { $notas += "$invalidos invalid price(s) ignored" }; if ($notaFecho) { $notas += $notaFecho }
+        $salto = [double]$pts[-1][1] / [double]$pts[-2][1] - 1
+        if ([math]::Abs($salto) -gt 0.5) { $notas += ('latest price {0:+0;-0}% from the previous close: check it' -f ($salto * 100)) }
+        Add-Fonte $nome 'prices' $u 'ok' $pts.Count $sw.ElapsedMilliseconds ($notas -join '; ')
         return [pscustomobject]@{ moeda = "$($res.meta.currency)"; ultimo = [double]$res.meta.regularMarketPrice; pontos = $pts; fonte = 'Yahoo Finance'; splits = $splits; parcial = $parcial; hora = $horaUltimo }
     } catch {
         $erroYahoo = $_.Exception.Message
@@ -1174,29 +1323,47 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0) {
                 $k = (Get-Url $u3) | ConvertFrom-Json
                 if (@($k.error).Count -and "$($k.error)") { throw "$($k.error)" }
                 $par = @($k.result.PSObject.Properties | Where-Object { $_.Name -ne 'last' })[0]
-                $desde = $Script:Agora.AddYears(-1).ToUnixTimeSeconds()
-                $pts = @(foreach ($v in @($par.Value)) { if ([int64]$v[0] -ge $desde) { , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$v[0]).ToString('yyyy-MM-dd'), [math]::Round([double]::Parse("$($v[4])", $Script:Inv), 4)) } })
+                $desde = $Script:Agora.AddYears(-1).ToUnixTimeSeconds(); $invK = 0
+                # o mesmo controlo do Yahoo: um preço nunca é zero, negativo ou não numérico
+                $pts = @(foreach ($v in @($par.Value)) { $c = 0.0
+                    if ([int64]$v[0] -lt $desde) { continue }
+                    if (-not [double]::TryParse("$($v[4])", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$c) -or [double]::IsNaN($c) -or [double]::IsInfinity($c) -or $c -le 0) { $invK++; continue }
+                    , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$v[0]).ToString('yyyy-MM-dd', $Script:Inv), [math]::Round($c, 4)) })
                 if ($pts.Count -lt 5) { throw 'Kraken returned no data' }
-                Add-Fonte $nome 'prices' $u3 'ok (Kraken fallback)' $pts.Count $sw.ElapsedMilliseconds "Yahoo failed: $erroYahoo"
+                $limpo = Remove-PicoIsolado $pts; $pts = $limpo.pontos; $invK += $limpo.removidos
+                Add-Fonte $nome 'prices' $u3 'ok (Kraken fallback)' $pts.Count $sw.ElapsedMilliseconds ("Yahoo failed: $erroYahoo" + $(if ($invK) { " | $invK invalid price(s) ignored" } else { '' }))
                 return [pscustomobject]@{ moeda = $Ativo.Moeda; ultimo = $pts[-1][1]; pontos = $pts; fonte = 'Kraken'; splits = @(); parcial = $true; hora = $Script:Agora.ToString('o') }
             } catch {
                 Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds "Yahoo: $erroYahoo | Kraken: $($_.Exception.Message)"
                 return $null
             }
         }
-        if (-not $Ativo.Stooq) { Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds $erroYahoo; return $null }
+        # ações dos EUA: o histórico da Nasdaq, validado contra a execução anterior (ver Get-SerieNasdaq)
+        $erros = "Yahoo: $erroYahoo"
+        if ($Ativo.Nasdaq) {
+            try {
+                $n = Get-SerieNasdaq $Ativo $Referencia
+                Add-Fonte $nome 'prices' $n.url 'ok (Nasdaq fallback)' $n.pontos.Count $sw.ElapsedMilliseconds ("Yahoo failed: $erroYahoo" + $(if ($n.invalidos) { " | $($n.invalidos) invalid price(s) ignored" } else { '' }))
+                return $n
+            } catch { $erros += " | Nasdaq: $($_.Exception.Message)" }
+        }
+        if (-not $Ativo.Stooq) { Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds $(if ($Ativo.Nasdaq) { $erros } else { $erroYahoo }); return $null }
         try {
             $u2 = "https://stooq.com/q/d/l/?s=$($Ativo.Stooq)&i=d"
             $csvTexto = Get-Url $u2
             if ($csvTexto -match '^\s*<') { throw 'Stooq returned a web page instead of CSV (it blocks automated requests)' }
             $linhas = @($csvTexto | ConvertFrom-Csv)
             if ($linhas.Count -lt 5 -or -not $linhas[0].Close) { throw 'Stooq returned no data' }
-            $desde = (Get-Date).AddYears(-1).ToString('yyyy-MM-dd')
-            $pts = @(foreach ($l in $linhas) { if ($l.Date -ge $desde) { , @($l.Date, [math]::Round([double]::Parse($l.Close, $Script:Inv), 4)) } })
+            $desde = $Script:Agora.UtcDateTime.AddYears(-1).ToString('yyyy-MM-dd', $Script:Inv)
+            $pts = @(foreach ($l in $linhas) { $c = 0.0
+                if ("$($l.Date)" -notmatch '^\d{4}-\d{2}-\d{2}$' -or $l.Date -lt $desde) { continue }
+                if (-not [double]::TryParse("$($l.Close)", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$c) -or $c -le 0) { continue }
+                , @($l.Date, [math]::Round($c, 4)) })
+            if ($pts.Count -lt 5) { throw 'Stooq returned no valid prices' }
             Add-Fonte $nome 'prices' $u2 'ok (Stooq fallback)' $pts.Count $sw.ElapsedMilliseconds "Yahoo failed: $erroYahoo"
             return [pscustomobject]@{ moeda = $(if ($Ativo.Moeda) { $Ativo.Moeda } else { '' }); ultimo = $pts[-1][1]; pontos = $pts; fonte = 'Stooq'; splits = @(); parcial = $false; hora = $null }
         } catch {
-            Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds "Yahoo: $erroYahoo | Stooq: $($_.Exception.Message)"
+            Add-Fonte $nome 'prices' $Ativo.Yahoo 'error' 0 $sw.ElapsedMilliseconds "$erros | Stooq: $($_.Exception.Message)"
             return $null
         }
     }
@@ -1310,7 +1477,7 @@ function Get-PesosETF([hashtable]$Etf = $null) {
         if ($somaTotal -lt 80 -or $somaTotal -gt 120) { throw ('Holdings weights add up to {0:N1}%, not about 100%: the file format may have changed' -f $somaTotal) }
         # "as of" date of the file (e.g. "01/Oct/2026"), kept also in ISO so the site can tell how old it is
         $dataIso = ''; $dt = [datetime]::MinValue
-        if ($dataRef -and [datetime]::TryParseExact($dataRef, [string[]]@('dd/MMM/yyyy', 'MMM dd, yyyy', 'dd MMM yyyy', 'yyyy-MM-dd', 'MM/dd/yyyy'), [Globalization.CultureInfo]::GetCultureInfo('en-US'), [Globalization.DateTimeStyles]::None, [ref]$dt)) { $dataIso = $dt.ToString('yyyy-MM-dd') }
+        if ($dataRef -and [datetime]::TryParseExact($dataRef, [string[]]@('dd/MMM/yyyy', 'MMM dd, yyyy', 'dd MMM yyyy', 'yyyy-MM-dd', 'MM/dd/yyyy'), [Globalization.CultureInfo]::GetCultureInfo('en-US'), [Globalization.DateTimeStyles]::None, [ref]$dt)) { $dataIso = $dt.ToString('yyyy-MM-dd', $Script:Inv) }
         $r = [pscustomobject]@{ AAPL = [math]::Round((& $peso 'AAPL'), 2); NVDA = [math]::Round((& $peso 'NVDA'), 2); GOOGL = [math]::Round(((& $peso 'GOOGL') + (& $peso 'GOOG')), 2); data = $dataRef; dataIso = $dataIso; aoVivo = $true; fonte = 'iShares (BlackRock)'; top10 = @(); setores = @(); posicoes = 0 }
         # Plausibility: the companies this fund is expected to hold must have a weight between 0 and 25%; in the other
         # funds the three companies may be absent (0%), but never negative or above 25%
@@ -1341,7 +1508,12 @@ function Get-PesosETF([hashtable]$Etf = $null) {
             $r.setores = @($acoes | Group-Object s | ForEach-Object { [pscustomobject]@{ s = $_.Name; w = [math]::Round(($_.Group | Measure-Object w -Sum).Sum, 2) } } | Sort-Object w -Descending)
         }
         $r | Add-Member -NotePropertyName agregados -NotePropertyValue (Get-AgregadosETF $linhas[$inicio] $csv $colPeso $Etf $texto) -Force
-        Add-Fonte $nomeFonte 'ETF' $urlEtf 'ok' $csv.Count $sw.ElapsedMilliseconds ''
+        # mudança de formato do ficheiro: as colunas que faltam dizem-se na fonte (o que depende delas fica "Unavailable")
+        $faltaCol = @('Name', 'Sector', 'Asset Class', 'Market Currency' | Where-Object { [array]::IndexOf($linhas[$inicio], $_) -lt 0 })
+        $notaEtf = @(); if ($faltaCol.Count) { $notaEtf += "file layout changed: no column $($faltaCol -join ', ')" }
+        if (-not $isinFicheiro.Success) { $notaEtf += 'no ISIN found in the file, so the fund could not be confirmed' }
+        foreach ($k in 'paises', 'setores', 'moedas') { if ($null -eq $r.agregados.$k) { $notaEtf += "$(@{ paises = 'country'; setores = 'sector'; moedas = 'currency' }[$k]) breakdown Unavailable" } }
+        Add-Fonte $nomeFonte 'ETF' $urlEtf 'ok' $csv.Count $sw.ElapsedMilliseconds ($notaEtf -join '; ')
         return (Add-InfoETF $r $Etf)
     } catch {
         Add-Fonte $nomeFonte 'ETF' $urlEtf 'error (using reference weights)' 0 $sw.ElapsedMilliseconds $_.Exception.Message
@@ -1364,8 +1536,8 @@ function Get-DatasResultados {
             $d = [datetime]::new([int]$m.Groups[3].Value, [int]$m.Groups[1].Value, [int]$m.Groups[2].Value)
             # Plausibility: the next earnings date is between yesterday and about 6 months ahead
             $distancia = ($d - $Script:Agora.UtcDateTime.Date).TotalDays
-            if ($distancia -lt -2 -or $distancia -gt 200) { throw "Implausible date in the response: $($d.ToString('yyyy-MM-dd'))" }
-            $saida.Add([pscustomobject]@{ e = $id; d = $d.ToString('yyyy-MM-dd'); st = $(if ($txt -match 'estimated') { 'E' } else { 'C' }) })
+            if ($distancia -lt -2 -or $distancia -gt 200) { throw "Implausible date in the response: $($d.ToString('yyyy-MM-dd', $Script:Inv))" }
+            $saida.Add([pscustomobject]@{ e = $id; d = $d.ToString('yyyy-MM-dd', $Script:Inv); st = $(if ($txt -match 'estimated') { 'E' } else { 'C' }) })
             Add-Fonte "Nasdaq: next earnings date ($id)" 'calendar' $u 'ok' 1 $sw.ElapsedMilliseconds ''
         } catch { Add-Fonte "Nasdaq: next earnings date ($id)" 'calendar' $u 'error' 0 $sw.ElapsedMilliseconds $_.Exception.Message }
     }
@@ -1405,7 +1577,7 @@ function Get-Dividendo([hashtable]$Ativo) {
         if (-not $lidos.Count) { throw 'No dividend payments in the provider data for the last 2 years' }
         $ord = @($lidos | Sort-Object t)
         # (pares recriados num ciclo simples: os que saem de um pipeline o Windows PowerShell 5.1 escreve como {value, Count})
-        $pagamentos = @(foreach ($x in $ord) { , @([DateTimeOffset]::FromUnixTimeSeconds($x.t).AddSeconds($gmt).UtcDateTime.ToString('yyyy-MM-dd'), [math]::Round([double]$x.v, 6)) })
+        $pagamentos = @(foreach ($x in $ord) { , @([DateTimeOffset]::FromUnixTimeSeconds($x.t).AddSeconds($gmt).UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv), [math]::Round([double]$x.v, 6)) })
         # pagamentos por ano: pelo intervalo mediano entre pagamentos (mensal, trimestral, semestral ou anual)
         $freq = $null
         if ($ord.Count -ge 2) {
@@ -1454,7 +1626,7 @@ function Get-DadosBitcoin {
     $sw = [Diagnostics.Stopwatch]::StartNew(); $u = 'https://api.alternative.me/fng/?limit=365&format=json'
     try {
         $j = (Get-Url $u) | ConvertFrom-Json
-        $serie = @(foreach ($x in @($j.data)) { , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$x.timestamp).ToString('yyyy-MM-dd'), [int]$x.value) })
+        $serie = @(foreach ($x in @($j.data)) { , @([DateTimeOffset]::FromUnixTimeSeconds([int64]$x.timestamp).ToString('yyyy-MM-dd', $Script:Inv), [int]$x.value) })
         if (-not $serie.Count) { throw 'No values' }
         $hoje = @($j.data)[0]
         if ([int]$hoje.value -lt 0 -or [int]$hoje.value -gt 100) { throw "Index out of range: $($hoje.value)" }   # the index is 0–100
@@ -1468,11 +1640,17 @@ function Get-DadosBitcoin {
     try {
         $p = ((Get-Url $u) | ConvertFrom-Json).bitcoin
         if (-not $p.eur -or [double]$p.eur -le 0) { throw 'No price' }
-        $m = [ordered]@{ eur = [double]$p.eur; usd = [double]$p.usd; var24 = [math]::Round([double]$p.eur_24h_change, 2); capEur = [double]$p.eur_market_cap; volEur = [double]$p.eur_24h_vol; dominio = $null; capTotalEur = $null }
+        # campos em falta ou inválidos ficam $null (o site mostra "—" ou a variação desde as 00:00 UTC): [double]$null seria 0,
+        # e uma variação de 0,00% ou um domínio de 0% pareceriam dados verdadeiros
+        $num = { param($x, [double]$Min = [double]::MinValue) $v = 0.0; if ($null -ne $x -and "$x" -ne '' -and [double]::TryParse("$x", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$v) -and -not [double]::IsNaN($v) -and -not [double]::IsInfinity($v) -and $v -ge $Min) { $v } else { $null } }
+        $v24 = & $num $p.eur_24h_change -100
+        $m = [ordered]@{ eur = [double]$p.eur; usd = (& $num $p.usd 0); var24 = $(if ($null -ne $v24) { [math]::Round($v24, 2) } else { $null }); capEur = (& $num $p.eur_market_cap 0); volEur = (& $num $p.eur_24h_vol 0); dominio = $null; capTotalEur = $null }
         $sw2 = [Diagnostics.Stopwatch]::StartNew(); $u2 = 'https://api.coingecko.com/api/v3/global'
         try {
             $g = ((Get-Url $u2) | ConvertFrom-Json).data
-            $m.dominio = [math]::Round([double]$g.market_cap_percentage.btc, 2); $m.capTotalEur = [double]$g.total_market_cap.eur
+            $dom = & $num $g.market_cap_percentage.btc 0
+            if ($null -eq $dom -or $dom -gt 100) { throw "Unexpected Bitcoin dominance: '$($g.market_cap_percentage.btc)'" }
+            $m.dominio = [math]::Round($dom, 2); $m.capTotalEur = & $num $g.total_market_cap.eur 0
             Add-Fonte 'CoinGecko: Bitcoin dominance' 'bitcoin' $u2 'ok' 1 $sw2.ElapsedMilliseconds ''
         } catch { Add-Fonte 'CoinGecko: Bitcoin dominance' 'bitcoin' $u2 'error' 0 $sw2.ElapsedMilliseconds $_.Exception.Message }
         $r.mercado = $m
@@ -1501,13 +1679,13 @@ function Get-DadosBitcoin {
         $previsto = $Script:Agora.AddMilliseconds(($proximo - $altura) * $msPrevisao)
         $r.rede = [ordered]@{
             altura = $altura; halvingAltura = $proximo; blocosFalta = $proximo - $altura; minBloco = [math]::Round($msBloco / 60000, 1); minBlocoEpoca = [math]::Round($msPrevisao / 60000, 2)
-            halvings = @(foreach ($h in $passados) { , @($h.t.UtcDateTime.ToString('yyyy-MM-dd'), $h.n) })
+            halvings = @(foreach ($h in $passados) { , @($h.t.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv), $h.n) })
             halvingPrevisto = $previsto.ToString('o'); recompensa = 50 / [math]::Pow(2, $epoca); recompensaNova = 50 / [math]::Pow(2, $epoca + 1)
             hashrateEH = $(if ($hash) { [math]::Round([double]$hash / 1e18, 0) } else { $null })
-            ajusteDif = $(if ($ajuste) { [math]::Round([double]$ajuste.difficultyChange, 2) } else { $null })
+            ajusteDif = $(if ($ajuste -and $null -ne $ajuste.difficultyChange -and "$($ajuste.difficultyChange)" -ne '') { [math]::Round([double]$ajuste.difficultyChange, 2) } else { $null })
             ajusteData = $(if ($ajuste -and $ajuste.estimatedRetargetDate) { [DateTimeOffset]::FromUnixTimeMilliseconds([int64]$ajuste.estimatedRetargetDate).ToString('o') } else { $null })
         }
-        $r.rede.evento = [ordered]@{ d = $previsto.ToString('yyyy-MM-dd'); e = 'BTC'; imp = 'High'; st = 'E'
+        $r.rede.evento = [ordered]@{ d = $previsto.ToString('yyyy-MM-dd', $Script:Inv); e = 'BTC'; imp = 'High'; st = 'E'
             ev = 'Bitcoin halving (block {0}): the block reward drops from {1} to {2} BTC' -f $proximo.ToString('N0', $Script:Inv), $r.rede.recompensa.ToString('0.#####', $Script:Inv), $r.rede.recompensaNova.ToString('0.#####', $Script:Inv) }
         Add-Fonte 'mempool.space: Bitcoin network and halving' 'bitcoin' 'https://mempool.space/' 'ok' 1 $sw.ElapsedMilliseconds ''
     } catch { Add-Fonte 'mempool.space: Bitcoin network and halving' 'bitcoin' 'https://mempool.space/' 'error' 0 $sw.ElapsedMilliseconds $_.Exception.Message }
@@ -1541,7 +1719,7 @@ function Get-HalvingAproximado {
     $u = $HalvingsConhecidos[-1]; $n = $u.n; $alt = $u.altura; $t = [DateTimeOffset]::Parse($u.t, $Script:Inv)
     do { $n++; $alt += 210000; $t = $t.AddMinutes(210000 * 10) } while ($t -lt $Script:Agora)
     $antes = 50 / [math]::Pow(2, $n - 1); $depois = 50 / [math]::Pow(2, $n)
-    return [pscustomobject]@{ d = $t.UtcDateTime.ToString('yyyy-MM-dd'); e = 'BTC'; imp = 'High'; st = 'E'
+    return [pscustomobject]@{ d = $t.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv); e = 'BTC'; imp = 'High'; st = 'E'
         ev = 'Bitcoin halving (block {0}), approximate date: the block reward drops from {1} to {2} BTC' -f $alt.ToString('N0', $Script:Inv), $antes.ToString('0.#####', $Script:Inv), $depois.ToString('0.#####', $Script:Inv) }
 }
 
@@ -2525,6 +2703,8 @@ const GEN=Date.parse(D.geradoEm)||Date.now(),DAY=864e5;
 const MES=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],WD=['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 /* datas e horas sempre na hora de Lisboa, seja qual for o fuso do computador */
 const LIS='Europe/Lisbon';
+/* tzParts: um formatador por fuso, criado uma vez (criá-lo custa ~0,1 ms e a página formata milhares de datas ao abrir) */
+const TZF={};
 const fdt=t=>{if(t==null||!isFinite(t))return'—';const p=tzParts(t,LIS);return(+p.day)+' '+MES[+p.month-1]+' '+p.year;};  /* data inválida (ex.: 2026-13-45 num backup antigo): '—' em vez de parar a página */
 const ic=(n,c)=>`<svg class="i${c?' '+c:''}" aria-hidden="true" focusable="false"><use href="#i-${n}"/></svg>`;
 const CO={AAPL:{n:'Apple',c:'var(--aapl)',i:'apple'},NVDA:{n:'NVIDIA',c:'var(--nvda)',i:'cpu'},GOOGL:{n:'Alphabet',c:'var(--googl)',i:'search'},SXR8:{n:'ETF SXR8',c:'var(--spx)',i:'pie'},EUNK:{n:'ETF EUNK',c:'var(--eunk)',i:'pie'},IS3N:{n:'ETF IS3N',c:'var(--is3n)',i:'pie'},EUNN:{n:'ETF EUNN',c:'var(--eunn)',i:'pie'},BTC:{n:'Bitcoin',c:'var(--btc)',i:'bitcoin'},MKT:{n:'Market & macro',c:'var(--macro)',i:'landmark'},GSPC:{n:'S&P 500',c:'var(--macro)',i:'landmark'},TU:{n:'You',c:'var(--muted)',i:'user'}};
@@ -2533,20 +2713,21 @@ const AL=Object.assign({},LV,{white:Object.assign({},LV.white,{n:'Info',i:'info'
 const TIER={primaria:'Primary source',referencia:'Leading press',outra:'Other source',cuidado:'Handle with care'};
 const TABN={overview:'overview',portfolio:'portfolio',news:'news',prices:'prices',fundamentals:'fundamentals',fx:'currency',calendar:'calendar',etf:'ETF',bitcoin:'Bitcoin',sources:'sources'};
 const SENT={positivo:'positive',negativo:'negative',misto:'mixed',neutro:'neutral'};
-const coTag=(c,chip)=>CO[c]?`<span class="co${chip?' co-chip':''}" style="--c:${CO[c].c}">${CO[c].n}</span>`:'';
+const coTag=(c,chip)=>CO[c]?`<span class="co${chip?' co-chip':''}" style="--c:${CO[c].c}">${esc(CO[c].n)}</span>`:'';
 const S0={co:'all',per:'1A',cur:'EUR',lvl:'all',lim:60};const st=Object.assign({},S0);
 const dias=n=>n+(n===1?' day':' days');
 const ago=t=>{if(!t)return'no date';const m=(GEN-t)/6e4;if(m<60)return`${Math.max(1,Math.round(m))} min ago`;const h=m/60;if(h<24)return`${Math.round(h)} h ago`;return`${dias(Math.round(h/24))} ago`;};
 /* o PowerShell 5.1 às vezes serializa um par [data, valor] como {value:[data, valor], Count:2}: aceita as duas formas */
 const pair=p=>Array.isArray(p)?p:(p&&Array.isArray(p.value)?p.value:[]);
-const toPts=a=>arr(a).map(pair).map(p=>[Date.parse(p[0]+'T00:00:00Z'),+p[1]]).filter(p=>isFinite(p[0])&&isFinite(p[1]));
+/* um valor em falta (null, '') fica de fora: +null daria 0, um preço de zero que pareceria uma queda de 100 % */
+const toPts=a=>arr(a).map(pair).filter(p=>p[1]!=null&&p[1]!==''&&typeof p[1]!=='boolean').map(p=>[Date.parse(p[0]+'T00:00:00Z'),+p[1]]).filter(p=>isFinite(p[0])&&isFinite(p[1]));
 const NEWS=arr(D.noticias).map(n=>{const o=arr(n.outras);return Object.assign({},n,{empresas:arr(n.empresas),temas:arr(n.temas),viaPosicao:arr(n.viaPosicao).map(String),outras:o,t:n.data?Date.parse(n.data):null,busca:[n.titulo,n.fonte].concat(o.map(x=>x.titulo+' '+x.fonte)).join(' ').toLowerCase()});});
 const ATIVOS=arr(D.ativos).map(a=>Object.assign({},a,{pts:toPts(a.pontos)}));
 const MERC=arr(D.mercado).map(a=>Object.assign({},a,{pts:toPts(a.pontos)}));
 /* ETF: os da configuração do script ($ETFs → D.etfs; o SXR8 também em D.etf, o formato anterior). O SXR8 vem sempre
    primeiro e é o ETF por omissão. Um ETF novo na configuração aparece em todo o site sem mudar este código. */
 const ETFD=Object.assign({},D.etf&&typeof D.etf==='object'?{SXR8:D.etf}:{},D.etfs&&typeof D.etfs==='object'&&!Array.isArray(D.etfs)?D.etfs:{});
-const ETF_IDS=[...new Set(['SXR8'].concat(Object.keys(ETFD),ATIVOS.filter(a=>a.tipo==='ETF').map(a=>a.id)))].filter(id=>id==='SXR8'||ATIVOS.some(a=>a.id===id));
+const ETF_IDS=[...new Set(['SXR8'].concat(Object.keys(ETFD),ATIVOS.filter(a=>a.tipo==='ETF').map(a=>a.id)))].filter(id=>/^[A-Za-z0-9._-]{1,15}$/.test(id)&&(id==='SXR8'||ATIVOS.some(a=>a.id===id)));   /* ids simples: entram em atributos e chaves */
 const ehEtf=id=>ETF_IDS.includes(id),etfInfo=id=>ETFD[id]&&typeof ETFD[id]==='object'?ETFD[id]:{};
 const etfIdx=id=>etfInfo(id).indice||(id==='SXR8'?'S&P 500':id),etfAcum=id=>etfInfo(id).acumulacao!==false;
 ETF_IDS.forEach(id=>{if(!CO[id])CO[id]={n:'ETF '+id,c:'var(--macro)',i:'pie'};});
@@ -2663,7 +2844,7 @@ function renderHero(){const fx=FX.length?FX[FX.length-1][1]:null;
  $('#tickers').innerHTML=ATIVOS.map(a=>{const s=stats(a.pts),m=(a.moeda||'').toUpperCase(),sym=m==='EUR'?'€':'$',c=heroColor(a),nm=ehEtf(a.id)?'ETF '+etfIdx(a.id):a.nome,fr=frescura(a.id,a.pts),ao=asOf(a,fr);
   const head=`<span class="tk-badge">${ic((CO[a.id]||{}).i||'chart')}</span><div class="tk-id"><span class="tk-name">${ehEtf(a.id)?'<span class="lg">ETF </span>'+esc(etfIdx(a.id)):esc(nm)}</span><span class="tk-sym">${esc(a.simbolo)}${m?'<span class="lg"> · '+esc(m)+'</span>':''}${ao?` · <span class="asof${fr&&(fr.velho||antigo(a))?' old':''}" title="${fr&&fr.velho?`${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind: the source may be lagging`:'Date of the latest price'}">${esc(ao)}</span>`:''}</span></div>`;
   if(!s)return`<article class="tk${HERO_LUGAR[a.id]||''}" data-tk="${a.id}" style="--c:${c}">${head}<p class="tk-empty">No prices. See the Sources section.</p></article>`;
-  const btc=a.id==='BTC',bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&isFinite(bm.var24)?+bm.var24:null,chg=v24!=null?v24:s.d1,chgT=v24!=null?'over the last 24 hours':btc?'since 00:00 UTC':a.parcial?'so far today (session open)':'in the last session';
+  const btc=a.id==='BTC',bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&bm.var24!=null&&isFinite(bm.var24)?+bm.var24:null,chg=v24!=null?v24:s.d1,chgT=v24!=null?'over the last 24 hours':btc?'since 00:00 UTC':a.parcial?'so far today (session open)':'in the last session';
   const fxe=lastFxPara(a),eur=btc?`${fx?`≈ $${nf(s.last*fx,0)} · `:''}market open 24/7`:m==='USD'?(fxe?`≈ €${nf(s.last/fxe,2)} at the rate of that day`:'No EUR/USD rate for that day'):'Priced in euros (Xetra)';
   const range=s.hi!=null?(()=>{const rp=Math.max(0,Math.min(100,(s.last-s.lo)/((s.hi-s.lo)||1)*100));return`<div class="range" data-tip="52-week range: ${sym}${nf(s.lo,2)} – ${sym}${nf(s.hi,2)}"><div class="range-bar"><span class="range-fill" style="width:${rp}%"></span><span class="range-mk" style="left:${rp}%"></span></div><div class="range-lbl"><span>${sym}${nf(s.lo,2)}</span><span>52-week low and high</span><span>${sym}${nf(s.hi,2)}</span></div></div>`;})():'';
   return`<article class="tk${HERO_LUGAR[a.id]||''}" data-tk="${a.id}" style="--c:${c}" aria-label="${esc(nm)}">${head}<span class="chg ${cls(chg)}" title="Change ${chgT}">${ic(chg!=null&&chg<0?'trend-down':'trend-up')}${pct(chg)}<span class="sr"> ${chgT}</span></span>`+
@@ -2693,16 +2874,18 @@ function alerts(){const out=[],add=(l,co,txt,tab)=>out.push({l,co,txt,tab});
   if(antigo(a))add('orange',a.id,`${nm}: prices could not be downloaded in this run, so the previous run's data is shown (latest price from ${fdS(fr.iso)}). The figures for ${a.nome} are not current.`,'sources');
   else if(fr&&fr.velho)add('orange',a.id,`${nm}: the latest price is from ${fdS(fr.iso)}, ${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind. The source may be lagging, so the figures for ${a.nome} are not current.`,'sources');
   /* a Bitcoin é várias vezes mais volátil do que as ações: os limiares são mais largos para não alertar todos os dias */
-  const btc=a.id==='BTC',L=btc?{d:6,o:-30,y:-15}:{d:4,o:-20,y:-10},bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&isFinite(bm.var24)?+bm.var24:null;
-  const mv=btc&&v24!=null?v24:s.d1,sess=btc?(v24!=null?'over the last 24 hours':'since 00:00 UTC'):(a.parcial?'so far today':'in the last session');
-  if(mv!=null&&Math.abs(mv)>=L.d)add('orange',a.id,`${nm} ${mv>0?'rose':'fell'} ${nf(Math.abs(mv))}% ${sess}. Look for the cause in today's news.`,'news');
+  const btc=a.id==='BTC',L=btc?{d:6,o:-30,y:-15}:{d:4,o:-20,y:-10},bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&bm.var24!=null&&isFinite(bm.var24)?+bm.var24:null;
+  /* dados atrasados ou da execução anterior: o movimento não é de hoje, e a mensagem diz de quando é (a variação de 24 h da
+     CoinGecko é sempre atual) */
+  const velho=antigo(a)||!!(fr&&fr.velho),mv=btc&&v24!=null?v24:s.d1,sess=btc&&v24!=null?'over the last 24 hours':velho&&fr?`on ${fdS(fr.iso)} (the latest price available, not today)`:btc?'since 00:00 UTC':(a.parcial?'so far today':'in the last session');
+  if(mv!=null&&Math.abs(mv)>=L.d)add('orange',a.id,`${nm} ${mv>0?'rose':'fell'} ${nf(Math.abs(mv))}% ${sess}. Look for the cause in ${velho&&!(btc&&v24!=null)?'the news of that day':"today's news"}.`,'news');
   if(s.dist!=null){
    if(s.dist<=L.o)add('orange',a.id,btc?`${nm} is ${nf(Math.abs(s.dist))}% below its 52-week high. Look for the cause (regulation, ETF flows, rates) in the news.`:`${nm} is ${nf(Math.abs(s.dist))}% below its 52-week high. Check whether expected earnings have also fallen (volatility or deterioration?).`,btc?'bitcoin':'prices');
    else if(s.dist<=L.y)add('yellow',a.id,`${nm} is ${nf(Math.abs(s.dist))}% below its 52-week high.`,btc?'bitcoin':'prices');
    if(s.dist<=L.y)out[out.length-1].ctx={id:a.id,d:-s.dist};  /* contexto (regra do utilizador e histórico), desenhado em renderAlerts */
    else if(s.dist>-1.5)add('white',a.id,`${nm} is close to its 52-week high.`,btc?'bitcoin':'prices');}
   if(s.ma200!=null&&s.last<s.ma200)add('yellow',a.id,`${nm} is below its ${btc?'200-day':'200-session'} average.`,btc?'bitcoin':'prices');});
- const fg=D.bitcoin&&D.bitcoin.sentimento;if(fg&&isFinite(fg.valor)){const k=fgClasse(+fg.valor);if(k==='xf')add('yellow','BTC',`Bitcoin sentiment is at extreme fear (${fg.valor}/100): this tends to coincide with sharp drops and high volatility.`,'bitcoin');else if(k==='xg')add('yellow','BTC',`Bitcoin sentiment is at extreme greed (${fg.valor}/100): euphoria tends to come with abrupt corrections.`,'bitcoin');}
+ const fg=D.bitcoin&&D.bitcoin.sentimento;if(fg&&fg.valor!=null&&isFinite(fg.valor)){const k=fgClasse(+fg.valor);if(k==='xf')add('yellow','BTC',`Bitcoin sentiment is at extreme fear (${fg.valor}/100): this tends to coincide with sharp drops and high volatility.`,'bitcoin');else if(k==='xg')add('yellow','BTC',`Bitcoin sentiment is at extreme greed (${fg.valor}/100): euphoria tends to come with abrupt corrections.`,'bitcoin');}
  /* câmbio: sem taxa não há valores em euros das ações americanas; com uma alternativa, diz qual */
  if(!FX.length)add('red','MKT','No EUR/USD rate in this run: the euro values of the US stocks, and of your portfolio, cannot be calculated and are left blank.','sources');
  else if(!/^Yahoo/.test(FXSRC))add('orange','MKT',`The EUR/USD series from Yahoo failed: conversions use the ${FXSRC}${FXSRC.startsWith('ECB')?', so euro figures older than 90 days (1 year, year to date, 52-week high) are not shown':''}.`,'sources');
@@ -2823,11 +3006,12 @@ function drawMoves(){const box=$('#tbl-moves'),nt=$('#movesNote');if(!box)return
 function reacoes(id){const r=D.resultadosSec&&typeof D.resultadosSec==='object'?D.resultadosSec[id]:null;
  if(!r||typeof r!=='object')return{ok:false,motivo:'no SEC data in this data file (it is collected with -EmailSEC, as the desktop shortcut does, from the next run)'};
  if(r.estado!=='ok'&&r.estado!=='previous run')return{ok:false,motivo:r.estado==='skipped'?'the SEC data was not collected (run the script with -EmailSEC)':'the SEC source failed'+(r.erro?': '+String(r.erro):'')};
- const H=HIST[id]||[],ts=H.map(p=>p[0]),R=arr(r.resultados),C=[];
+ /* um preço intradiário (sessão ainda aberta quando a página foi gerada) não é um fecho: não conta como reação */
+ const a=ATIVOS.find(x=>x.id===id),H0=HIST[id]||[],H=a&&a.parcial&&H0.length&&a.pts.length&&H0[H0.length-1][0]>=a.pts[a.pts.length-1][0]?H0.slice(0,-1):H0,ts=H.map(p=>p[0]),R=arr(r.resultados),C=[];
  R.forEach(x=>{if(!x||!isoOk(x.sessao))return;const t=Date.parse(x.sessao+'T00:00:00Z'),i=ts.indexOf(t);if(i<1)return;const p0=H[i-1][1];C.push({x,t,r1:(H[i][1]/p0-1)*100,r5:i+4<H.length?(H[i+4][1]/p0-1)*100:null});});
  C.sort((a,b)=>b.t-a.t);const ab=C.map(c=>Math.abs(c.r1)).sort((a,b)=>a-b),n=ab.length,med=n?(n%2?ab[(n-1)/2]:(ab[n/2-1]+ab[n/2])/2):null;
  return{ok:true,C,med,sem:R.length-C.length,ant:r.estado==='previous run',fonte:String(r.fonte||'')};}
-const QUANDO={after:'after the close',before:'before the open',during:'during the session'};
+const QUANDO={after:'after the close',before:'before the open',during:'during the session',closed:'exchange closed that day'};
 function drawEarn(){const box=$('#tbl-earn'),cs=$('#earnCases');if(!box)return;const ids=['AAPL','NVDA','GOOGL'].filter(id=>st.co==='all'||st.co===id),L=ids.map(id=>({id,E:reacoes(id)}));
  const quando=x=>`${fdS(x.entrega)}${x.horaNY?`, ${esc(x.horaNY.slice(11))} New York (${QUANDO[x.quando]||''})`:''}`;
  box.innerHTML='<thead><tr><th scope="col">Company</th><th scope="col">Latest earnings</th><th class="num" scope="col">Reaction session</th><th class="num" scope="col">After 5 sessions</th><th class="num" scope="col">Median move (absolute)</th><th class="num" scope="col">Cases</th></tr></thead><tbody>'+(L.length?L.map(({id,E})=>{
@@ -2967,7 +3151,7 @@ function corr(a,b){const mb=new Map(b.map(p=>[p[0],p[1]])),c=a.filter(p=>mb.has(
 const grande=v=>v==null||!isFinite(v)?'—':v>=1e12?nf(v/1e12,2)+' trillion':v>=1e9?nf(v/1e9,1)+' billion':nf(v/1e6,0)+' million';
 function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.mercado,fg=B.sentimento,rd=B.rede,p=a?a.pts:[],s=stats(p),fx=FX.length?FX[FX.length-1][1]:null;
  $('#btcLead').textContent=`Bitcoin trades 24 hours a day, 7 days a week, and is tracked here in euros (BTC/EUR).${s?` Last price: €${nf(s.last,0)}; ${pct(s.m1)} over a month, ${pct(s.y1)} over a year and ${pct(s.dist)} from its 52-week high.`:' No prices in this run: see the Sources section.'}`;
- const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,v24=m&&isFinite(m.var24)?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
+ const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,v24=m&&m.var24!=null&&isFinite(m.var24)?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
  $('#btcKpis').innerHTML=k('bitcoin','Price',s?'€'+nf(s.last,0):(m?'€'+nf(m.eur,0):'—'),m&&m.usd?`≈ $${nf(m.usd,0)}`:(s&&fx?`≈ $${nf(s.last*fx,0)}`:'in euros'))+
   k('clock','24 hours',pct(v24),m?'change over the last 24 h':'since 00:00 UTC',cls(v24))+
   k('calendar','7 days',pct(w1),s?`30 days: ${pct(s.m1)}`:'',cls(w1))+
@@ -2975,7 +3159,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
  const sl=slice(p),t0=sl.length?sl[0][0]:0,cut=x=>x.filter(q=>q[0]>=t0),ch=sl.length>1?(sl[sl.length-1][1]/sl[0][1]-1)*100:null;
  $('#k-btc').innerHTML=s?`<span class="mk-v">€${nf(s.last,0)}</span><span class="mk-c ${cls(ch)}">${pct(ch)} over the period</span>`:'';
  lineMulti($('#ch-btc'),[{n:'Bitcoin',c:'var(--btc)',pts:sl},{n:'50-day average',c:'var(--muted)',pts:cut(mm(p,50))},{n:'200-day average',c:'var(--accent)',pts:cut(mm(p,200))}],{dec:0,tdec:0,unit:' €',h:360,label:'Bitcoin price in euros'});
- if(fg&&isFinite(fg.valor)){const sp=toPts(fg.serie),v=+fg.valor,col={xf:'var(--red)',f:'var(--orange)',n:'var(--yellow)',g:'var(--pos)',xg:'var(--pos)'}[fgClasse(v)],antes=d=>{if(!sp.length)return'—';const t=sp[sp.length-1][0]-d*DAY,q=sp.filter(x=>x[0]<=t);return q.length?q[q.length-1][1]:'—';};
+ if(fg&&fg.valor!=null&&isFinite(fg.valor)){const sp=toPts(fg.serie),v=+fg.valor,col={xf:'var(--red)',f:'var(--orange)',n:'var(--yellow)',g:'var(--pos)',xg:'var(--pos)'}[fgClasse(v)],antes=d=>{if(!sp.length)return'—';const t=sp[sp.length-1][0]-d*DAY,q=sp.filter(x=>x[0]<=t);return q.length?q[q.length-1][1]:'—';};
   $('#btcSent').innerHTML=`<div class="big-v"><b>${v}</b><span style="color:${col}">${esc(fg.classe)}</span></div><div class="fng-bar" role="img" aria-label="Index at ${v} out of 100"><i style="left:${Math.max(0,Math.min(100,v))}%"></i></div><div class="fng-lbl"><span>Extreme fear</span><span>Neutral</span><span>Extreme greed</span></div><ul class="kv"><li>A week ago<b>${antes(7)}</b></li><li>A month ago<b>${antes(30)}</b></li></ul>`;
   lineMulti($('#ch-fng'),[{n:'Fear & Greed',c:'var(--btc)',pts:slice(sp)}],{dec:0,h:170,ref:50,refLabel:'neutral',label:'Fear & Greed Index over the period'});}
  else{empty($('#btcSent'),'No sentiment data in this run.');$('#ch-fng').innerHTML='';}
@@ -2983,7 +3167,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
   $('#btcHalv').innerHTML=`<div class="big-v"><b>${nf(dd,0)}</b><span class="muted">days (forecast)</span></div><div class="prog" role="img" aria-label="${nf(pr,1)}% of the current cycle"><i style="width:${pr}%"></i></div><div class="fng-lbl"><span>Block ${nf(ini,0)}</span><span>${nf(pr,1)}% of the cycle</span><span>${nf(rd.halvingAltura,0)}</span></div><ul class="kv"><li>Expected date<b>${isFinite(tH)?fdt(tH):'—'}</b></li><li>Remaining<b>${nf(rd.blocosFalta,0)} blocks</b></li><li>Block reward<b>${bt(rd.recompensa)} → ${bt(rd.recompensaNova)} BTC</b></li></ul>`;}
  else empty($('#btcHalv'),'No network data in this run.');
  const R=[];if(rd){R.push(['Current block',nf(rd.altura,0)],['Average block time',nf(rd.minBloco,1)+' min'+(rd.minBlocoEpoca?` · ${nf(rd.minBlocoEpoca,2)} min since the last halving (used for the forecast)`:'')],['Hash rate',rd.hashrateEH!=null?nf(rd.hashrateEH,0)+' EH/s':'—']);if(rd.ajusteDif!=null)R.push(['Next difficulty adjustment',pct(rd.ajusteDif)+(rd.ajusteData?' · '+fdt(Date.parse(rd.ajusteData)):'')]);}
- if(m){R.push(['Market cap','€'+grande(m.capEur)],['24 h volume','€'+grande(m.volEur)]);if(m.dominio!=null)R.push(['Share of the crypto market',nf(m.dominio,1)+'%']);}
+ if(m){R.push(['Market cap',m.capEur!=null?'€'+grande(m.capEur):'—'],['24 h volume',m.volEur!=null?'€'+grande(m.volEur):'—']);if(m.dominio!=null)R.push(['Share of the crypto market',nf(m.dominio,1)+'%']);}
  if(R.length)$('#btcRede').innerHTML=`<ul class="kv" style="margin-top:0">${R.map(r=>`<li>${r[0]}<b>${r[1]}</b></li>`).join('')}</ul>`;else empty($('#btcRede'),'No network or market data in this run.');
  const g2=g?[Object.assign({},g,{moeda:g.moeda||'USD'})]:[],cr=ATIVOS.filter(x=>x.id!=='BTC').concat(g2).map(x=>({x,v:corr(p,inCur(x,'EUR'))})).filter(o=>o.v!=null);
  barChart($('#ch-corr'),{cats:cr.map(o=>nmOf(o.x)),series:[{n:'Correlation',c:'var(--btc)',colors:cr.map(o=>colorOf(o.x)),values:cr.map(o=>o.v)}],dec:2,tdec:1,label:'Correlation of Bitcoin with the other assets'});
@@ -2994,7 +3178,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
 /* ---------- dados guardados neste browser (carteira, compras de Bitcoin, simuladores) ---------- */
 /* nada sai do computador: fica no localStorage do browser; o backup em ficheiro protege contra limpezas do browser */
 /* set: guarda e, se forem dados da carteira, marca a hora da alteração e grava no ficheiro de backup; raw: só guarda */
-const store={get(k,d){try{const v=localStorage.getItem('bb.'+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set(k,v){try{localStorage.setItem('bb.'+k,JSON.stringify(v));if(/^(buys|lots|sales|deleted|targets|policy|notes|fees)$/.test(k)){localStorage.setItem('bb.savedAt',JSON.stringify(new Date().toISOString()));aoMudar();}return true;}catch(e){return false;}},
+const store={get(k,d){try{const v=localStorage.getItem('bb.'+k);return v==null?d:JSON.parse(v);}catch(e){return d;}},set(k,v){try{localStorage.setItem('bb.'+k,JSON.stringify(v));if(/^(buys|lots|sales|deleted|targets|policy|notes|fees)$/.test(k)){localStorage.setItem('bb.savedAt',JSON.stringify(new Date().toISOString()));ALTEROU=true;aoMudar();}return true;}catch(e){return false;}},
  raw(k,v){try{localStorage.setItem('bb.'+k,JSON.stringify(v));return true;}catch(e){return false;}}};
 const eur=(v,d=0)=>(v==null||!isFinite(v))?'—':(v<0?'−':'')+'€'+nf(Math.abs(v),d);
 /* o sinal segue o valor arredondado: −€0,08 com 0 casas decimais aparece como €0 e não como −€0 */
@@ -3231,7 +3415,9 @@ function buildBuys(){const f=$('#buyForm');if(!f)return;const sel=$('#buyAsset')
   if(Date.parse(d+'T00:00:00Z')>hojeL()){msg.textContent=`The ${v?'sale':'purchase'} date cannot be in the future.`;return;}
   /* base para os desdobramentos: o preço desse dia no histórico desta página e a data da base desse histórico */
   const h=HIST[a]||[],pt=a!=='BTC'?precoEm(h,d):null,base=a==='BTC'?{}:Object.assign({u:h.length?isoU(h[h.length-1][0]):isoU(GEN)},pt?{r:[isoU(pt[0]),pt[1]]}:{});
-  if(v){const nova=Object.assign({id:novoId(),a,d,q,p},base),C=carteira(nova),mal=C.vendas.find(x=>x.falta>0);
+  /* recusa só o que esta venda estraga: a própria sem unidades, ou uma venda que passe a ter falta (ou mais falta) do que
+     tinha. Uma venda antiga já sem compras (dados antigos ou restaurados, de qualquer ativo) não impede as outras (B14) */
+  if(v){const f0={};carteira().vendas.forEach(x=>{f0[x.id]=x.falta;});const nova=Object.assign({id:novoId(),a,d,q,p},base),C=carteira(nova),mal=C.vendas.find(x=>x.falta>(f0[x.id]||0)+1e-9);
    if(mal){const tem=arr(C.lotes[a]).filter(x=>x.d<=d).reduce((s,x)=>s+x.q0,0);msg.textContent=mal.id===nova.id?`You did not hold enough ${nomePF(a)} on ${fdt(Date.parse(d+'T00:00:00Z'))} for this sale (purchases up to that day: ${btcF(tem)}, minus earlier sales). Record the purchase first.`:'This sale would leave a later sale without enough units to sell. Check the dates.';return;}
    const L=arr(store.get('sales',[]));L.push(nova);if(!store.set('sales',L)){msg.textContent='Could not save: this browser is blocking local storage.';return;}guardaFeeForm(nova.id);
    msg.textContent=`Sale saved: ${btcF(q)} × ${nomePF(a)} on ${fdt(Date.parse(d+'T00:00:00Z'))} at ${eur(p,2)} each. It uses up your oldest purchases first.`;}
@@ -3276,9 +3462,10 @@ function buildPf(){const t=$('#tbl-pf');if(!t)return;
 function pfDados(){const C=carteira();
  return PF.map(([id,n,u])=>{const L=arr(C.lotes[id]),V=C.vendas.filter(v=>v.a===id),q=L.reduce((s,x)=>s+x.q,0),c=L.reduce((s,x)=>s+x.q*x.cu,0),real=V.reduce((s,v)=>s+(v.real||0),0);
   const src=(L.length?`${L.length} purchase${L.length>1?'s':''}`:'No purchases yet')+(V.length?` · ${V.length} sale${V.length>1?'s':''}`:'');
-  const p=lastEur(id),v=q>1e-12&&p!=null?q*p:null,g=v!=null&&c>0?v-c:null,a=ATIVOS.find(x=>x.id===id),s=a?stats(inCur(a,'EUR')):null;
-  return{id,n,u,q,c,p,v,g,real,vendas:V.length,src,d1:s?s.d1:null,semPreco:q>1e-12&&p==null};});}
-function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a+(x.v||0),0),G=R.filter(x=>x.g!=null),tg=G.reduce((a,x)=>a+x.g,0),tc=G.reduce((a,x)=>a+x.c,0),dia=R.reduce((a,x)=>a+(x.v&&x.d1!=null?x.v*x.d1/(100+x.d1):0),0),real=R.reduce((a,x)=>a+x.real,0),nv=R.reduce((a,x)=>a+x.vendas,0),falta=R.filter(x=>x.semPreco);
+  const p=lastEur(id),v=q>1e-12&&p!=null?q*p:null,g=v!=null&&c>0?v-c:null,a=ATIVOS.find(x=>x.id===id),s=a?stats(inCur(a,'EUR')):null,fr=a?frescura(id,a.pts):null;
+  /* velho: o último preço é da execução anterior ou está atrasado em relação à bolsa (o seu "último dia" não é o de hoje) */
+  return{id,n,u,q,c,p,v,g,real,vendas:V.length,src,d1:s?s.d1:null,velho:!!a&&(antigo(a)||!!(fr&&fr.velho)),semPreco:q>1e-12&&p==null};});}
+function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a+(x.v||0),0),G=R.filter(x=>x.g!=null),tg=G.reduce((a,x)=>a+x.g,0),tc=G.reduce((a,x)=>a+x.c,0),dia=R.reduce((a,x)=>a+(x.v&&x.d1!=null&&!x.velho?x.v*x.d1/(100+x.d1):0),0),diaFora=R.filter(x=>x.v&&x.velho),real=R.reduce((a,x)=>a+x.real,0),nv=R.reduce((a,x)=>a+x.vendas,0),falta=R.filter(x=>x.semPreco);
  drawDiv(R);drawRet(R);drawTgt(R);drawPol();drawStress(R);drawExpo(R);
  R.forEach(x=>{$('#pf-q-'+x.id).textContent=x.q>1e-12?btcF(x.q):'—';$('#pf-c-'+x.id).textContent=x.c>0?eur(x.c,2):'—';$('#pf-p-'+x.id).textContent=eur(x.p,2);$('#pf-v-'+x.id).textContent=x.v!=null?eur(x.v,2):(x.semPreco?'no price':'—');
   const gc=$('#pf-g-'+x.id);gc.className='num '+cls(x.g);gc.innerHTML=x.g!=null?`${eurS(x.g,2)} <small>${pct(x.g/x.c*100)}</small>`:'—';
@@ -3286,7 +3473,7 @@ function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a
  $('#pf-tv').textContent=tv?eur(tv,2):'—';$('#pf-tc').textContent=tc?eur(tc,2):'—';const tgc=$('#pf-tg');tgc.className='num '+(G.length?cls(tg):'');tgc.innerHTML=G.length?`${eurS(tg,2)} <small>${tc?pct(tg/tc*100):''}</small>`:'—';$('#pf-tw').textContent=tv?'100%':'—';
  if(!tv){$('#pfKpis').innerHTML=`<p class="empty">${ic('wallet')}${falta.length?`No current price for ${falta.map(x=>esc(x.n)).join(', ')} in this run (see Sources &amp; method), so the portfolio cannot be valued.`:'Add your purchases below (and Bitcoin purchases in the Bitcoin section) to see your portfolio in euros.'}</p>`;empty($('#ch-pf-alloc'),'Nothing to show yet.');empty($('#ch-pf-exp'),'Nothing to show yet.');return;}
  $('#pfKpis').innerHTML=kpi('wallet','Portfolio value',eur(tv),falta.length?`without ${falta.map(x=>esc(x.n)).join(', ')} (no current price)`:'in euros, at the latest prices')+kpi('euro','Invested',eur(tc),nv?'cost of what you still hold':'total paid')+kpi('chart','Gain',eurS(tg),tc?pct(tg/tc*100):'',cls(tg))+
-  (nv?kpi('check','Realised gain',eurS(real),`on ${nv} sale${nv>1?'s':''} (oldest purchases first)`,cls(real)):'')+kpi('activity','Latest daily move',eurS(dia),'last session (Bitcoin: since 00:00 UTC)',cls(dia));
+  (nv?kpi('check','Realised gain',eurS(real),`on ${nv} sale${nv>1?'s':''} (oldest purchases first)`,cls(real)):'')+kpi('activity','Latest daily move',R.some(x=>x.v&&!x.velho)?eurS(dia):'—','last session (Bitcoin: since 00:00 UTC)'+(diaFora.length?` · without ${diaFora.map(x=>esc(x.n)).join(', ')} (price not current)`:''),cls(dia));
  const fat=R.filter(x=>x.v>0).map(x=>[ehEtf(x.id)?'ETF '+x.id:x.n,x.v/tv*100,CO[x.id].c,x.v]);
  $('#ch-pf-alloc').innerHTML='<div class="dist" role="img" aria-label="'+fat.map(x=>`${x[0]} ${nf(x[1],1)}%`).join(', ')+'">'+fat.map(x=>`<div data-tip="${esc(x[0])}: ${nf(x[1],1)}% (${eur(x[3])})" style="width:${x[1]}%;background:${x[2]}"></div>`).join('')+'</div><ul class="etf-legend">'+fat.map(x=>`<li style="--c:${x[2]}"><span class="dot"></span><span class="nm">${esc(x[0])}</span><span class="bar"><i style="width:${x[1]}%"></i></span><b>${nf(x[1],1)}%</b></li>`).join('')+'</ul>';
  /* exposição real: o que tem diretamente + o que tem através de cada ETF (valor do ETF × peso da empresa nesse fundo).
@@ -3508,7 +3695,10 @@ function drawExpo(R){if(!$('#expoOut'))return;const X=exposicao(R);
    recente: são pagamentos futuros, por isso não se usa a taxa da data de compra. SXR8 (acumulação) e Bitcoin ficam de fora.
    Sem dados (fonte em falha, dados com mais de 180 dias, resposta inválida) mostra "Unavailable", nunca €0. */
 /* as empresas com dividendos recolhidos pelo script; um ETF de acumulação nunca entra (os dividendos ficam no preço) */
-const DIV_IDS=[...new Set(['AAPL','NVDA','GOOGL'].concat(D.dividendos&&typeof D.dividendos==='object'&&!Array.isArray(D.dividendos)?Object.keys(D.dividendos):[]))].filter(id=>!(ehEtf(id)&&etfAcum(id))&&id!=='BTC'&&PF.some(p=>p[0]===id)),DIV_MAX_DIAS=180,c2=v=>Math.round(v*100)/100;
+const DIV_IDS=[...new Set(['AAPL','NVDA','GOOGL'].concat(D.dividendos&&typeof D.dividendos==='object'&&!Array.isArray(D.dividendos)?Object.keys(D.dividendos):[]))].filter(id=>!(ehEtf(id)&&etfAcum(id))&&id!=='BTC'&&PF.some(p=>p[0]===id)),DIV_MAX_DIAS=180,
+ /* arredonda aos cêntimos, metade para longe do zero, sobre o valor decimal (15 algarismos): 1.005 × 100 dá
+    100.49999999999999 em vírgula flutuante, e Math.round sozinho daria €1.00 em vez de €1.01 */
+ c2=v=>{if(v==null||!isFinite(v))return v;const x=Math.round(+(Math.abs(v)*100).toPrecision(15))/100;return v<0?-x:x;};
 function divDados(id){const v=D.dividendos&&D.dividendos[id];if(!v||typeof v!=='object')return{ok:false,motivo:'No dividend data in this run'};
  if(v.estado!=='ok'&&v.estado!=='previous run')return{ok:false,motivo:'Source failed'+(v.erro?': '+v.erro:'')};
  const t=Date.parse(v.obtidoEm||''),a=v.anualPorAcao==null||v.anualPorAcao===''?NaN:+v.anualPorAcao,y=v.rendimentoPct==null?NaN:+v.rendimentoPct,u=pair(v.ultimo);
@@ -3704,9 +3894,12 @@ function limpaAlvos(t){if(!t||typeof t!=='object'||!t.weights||typeof t.weights!
  if(Math.abs(s-100)>0.01)return null;const b=+t.band,m=+t.monthly,ta=Date.parse(t.at||'');
  return{weights:w,band:isFinite(b)&&b>0&&b<=50?b:5,monthly:isFinite(m)&&m>=0?m:0,at:isFinite(ta)?new Date(ta).toISOString():null};}
 /* valida tudo o que vem de um ficheiro (o deste projeto ou um restaurado) antes de o usar */
-function limpaBackup(d){const ok=x=>x&&typeof x==='object'&&/^\d{4}-\d{2}-\d{2}$/.test(x.d),num=v=>+v,
-  /* id estável mesmo nas cópias antigas sem id, para juntar o mesmo ficheiro duas vezes não duplicar nada */
-  nid=(x,a)=>x.id!=null&&x.id!==''?String(x.id):['x',a,x.d,x.q,x.p!=null?x.p:x.c].join('_'),
+function limpaBackup(d){const ok=x=>x&&typeof x==='object'&&/^\d{4}-\d{2}-\d{2}$/.test(x.d),
+  /* só números (ou texto numérico): +true, +null, +'' e +[5] davam 1, 0, 0 e 5, e um custo em falta passava a €0 */
+  num=v=>typeof v==='number'?v:typeof v==='string'&&/^\s*[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?\s*$/i.test(v)?+v:NaN,
+  /* id estável mesmo nas cópias antigas sem id, para juntar o mesmo ficheiro duas vezes não duplicar nada; duas entradas
+     iguais (mesmo ativo, data, quantidade e preço, por exemplo duas compras iguais no mesmo dia) ficam ambas, com #2, #3… */
+  rep={},nid=(x,a)=>{if(x.id!=null&&x.id!=='')return String(x.id);const b=['x',a,x.d,x.q,x.p!=null?x.p:x.c].join('_');rep[b]=(rep[b]||0)+1;return rep[b]>1?b+'#'+rep[b]:b;},
   ref=r=>Array.isArray(r)&&r.length===2&&/^\d{4}-\d{2}-\d{2}$/.test(r[0])&&+r[1]>0?[r[0],+r[1]]:null,bas=u=>/^\d{4}-\d{2}-\d{2}$/.test(u||'')?u:null,
   base=(o,x)=>{const r=ref(x.r),u=bas(x.u);if(r)o.r=r;if(u)o.u=u;return o;};
  const buys=arr(d.buys).concat(arr(d.etfLots).map(x=>Object.assign({a:'SXR8'},x))).filter(x=>ok(x)&&BUY_IDS.includes(x.a)&&num(x.q)>0&&num(x.p)>0).map(x=>base({id:nid(x,x.a),a:x.a,d:x.d,q:num(x.q),p:num(x.p)},x));
@@ -3748,7 +3941,8 @@ function juntaBackup(d,projeto){const F=limpaBackup(d),L0=listasLocais(),del0=ap
  return{novos,saem,extraLocal,alvos,pol,notas,fees,n:{buys:res.buys.length,lots:res.lots.length,sales:res.sales.length}};}
 /* o "puxador" do ficheiro escolhido fica no IndexedDB deste browser, para não ser preciso escolher a pasta outra vez */
 function idb(mode,fn){return new Promise((res,rej)=>{let o;try{o=indexedDB.open('bluechip-board',1);}catch(e){rej(e);return;}o.onupgradeneeded=()=>o.result.createObjectStore('h');o.onerror=()=>rej(o.error);
- o.onsuccess=()=>{const db=o.result,tx=db.transaction('h',mode),r=fn(tx.objectStore('h'));tx.oncomplete=()=>{db.close();res(r&&r.result);};tx.onerror=()=>{db.close();rej(tx.error);};};});}
+ o.onsuccess=()=>{const db=o.result;let tx,r;try{tx=db.transaction('h',mode);r=fn(tx.objectStore('h'));}catch(e){db.close();rej(e);return;}  /* sem isto um erro aqui deixava a promessa por resolver */
+  tx.oncomplete=()=>{db.close();res(r&&r.result);};tx.onerror=()=>{db.close();rej(tx.error);};tx.onabort=()=>{db.close();rej(tx.error);};};});}
 const marcaGravado=sv=>{store.raw('fileSaved',sv);store.raw('fileWrittenAt',new Date().toISOString());};
 /* descarrega um ficheiro gerado na página (fica só neste computador) */
 function baixa(nome,txt,tipo){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type:tipo}));a.download=nome;document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);}
@@ -3758,18 +3952,39 @@ async function guardaFicheiro(interativo){const dadosB=dadosBackup(),txt=JSON.st
  if(!window.showSaveFilePicker||!window.indexedDB){if(interativo)descarrega(txt,dadosB.saved);else{AUTO=false;estadoBk();}return;}
  try{if(!FH)FH=(await idb('readonly',s=>s.get('file')).catch(()=>null))||null;
   if(FH){let p=await FH.queryPermission({mode:'readwrite'});if(p!=='granted'&&interativo)p=await FH.requestPermission({mode:'readwrite'});if(p!=='granted'){if(!interativo){AUTO=false;estadoBk();return;}FH=null;}}
-  if(!FH){if(!interativo){AUTO=false;estadoBk();return;}FH=await window.showSaveFilePicker({id:'bluechip-board',startIn:'documents',suggestedName:BK_NOME,types:[{description:'Bluechip Board backup',accept:{'application/json':['.json']}}]});await idb('readwrite',s=>s.put(FH,'file')).catch(()=>{});}
+  if(!FH){if(!interativo){AUTO=false;estadoBk();return;}
+   /* escolhe-se a PASTA e confirma-se logo que é a do projeto (tem o bluechip-board.html): uma pasta errada é recusada já,
+      em vez de só se saber na execução seguinte do script. Sem seletor de pastas, o seletor de ficheiro de antes. */
+   if(window.showDirectoryPicker){const dir=await window.showDirectoryPicker({id:'bluechip-board',mode:'readwrite',startIn:'documents'});
+    let doProjeto=false;try{await dir.getFileHandle('bluechip-board.html');doProjeto=true;}catch(e){}
+    if(!doProjeto){bkMsg(`The folder "${dir.name}" has no bluechip-board.html, so it is not the BluechipBoard project folder: nothing was saved. Click Save to project folder again and choose the folder where bluechip-board.html and the script are.`);estadoBk();return;}
+    FH=await dir.getFileHandle(BK_NOME,{create:true});}
+   else FH=await window.showSaveFilePicker({id:'bluechip-board',startIn:'documents',suggestedName:BK_NOME,types:[{description:'Bluechip Board backup',accept:{'application/json':['.json']}}]});
+   await idb('readwrite',s=>s.put(FH,'file')).catch(()=>{});}
   const w=await FH.createWritable();await w.write(txt);await w.close();
   AUTO=true;marcaGravado(dadosB.saved);estadoBk();
   bkMsg(`Saved to ${FH.name} at ${hmL(Date.now())}. It must be in the BluechipBoard folder, next to bluechip-board.html, for the site to load it. While this page is open, every change is saved there automatically.`);
  }catch(e){if(e&&e.name==='AbortError'){bkMsg('Save cancelled.');return;}AUTO=false;estadoBk();if(interativo)descarrega(txt,dadosB.saved);}}
 const resumoBk=n=>`${n.buys} stock and ETF purchase${n.buys===1?'':'s'}, ${n.lots} Bitcoin purchase${n.lots===1?'':'s'} and ${n.sales} sale${n.sales===1?'':'s'}`;
-function aoMudar(){clearTimeout(bkT);bkT=setTimeout(()=>guardaFicheiro(false),800);estadoBk();}
+function aoMudar(){pedeAuto();clearTimeout(bkT);bkT=setTimeout(()=>guardaFicheiro(false),800);estadoBk();}
+/* Depois de reabrir a página, o browser só dá de novo acesso ao ficheiro com um gesto do utilizador. A primeira alteração
+   feita aqui (um clique em Add, Save, Remove…) é esse gesto: pede-se logo a autorização, uma vez por página, e com ela as
+   gravações automáticas voltam. Sem gesto o pedido é recusado pelo browser e fica para a alteração seguinte. */
+let PEDIU=false,ALTEROU=false;
+function pedeAuto(){if(AUTO||PEDIU||!FH||typeof FH.requestPermission!=='function')return;let p;try{p=FH.requestPermission({mode:'readwrite'});}catch(e){return;}PEDIU=true;
+ Promise.resolve(p).then(r=>{if(r==='granted'){AUTO=true;clearTimeout(bkT);guardaFicheiro(false);}else estadoBk();},()=>{PEDIU=false;});}
+/* ao abrir: o ficheiro ligado (se o browser o guardou) e, se a autorização ainda estiver dada (alguns browsers deixam-na
+   "em todas as visitas"), as gravações automáticas ficam logo ativas e o que faltar no ficheiro é gravado */
+function ligaFicheiro(){if(!window.showSaveFilePicker||!window.indexedDB)return Promise.resolve(null);
+ return idb('readonly',s=>s.get('file')).then(h=>{if(!h)return null;if(!FH)FH=h;
+  return Promise.resolve(h.queryPermission?h.queryPermission({mode:'readwrite'}):'prompt').then(p=>{if(p==='granted'){AUTO=true;if(pendente())guardaFicheiro(false);else estadoBk();}return h;},()=>h);}).catch(()=>null);}
 /* caixa de estado: diz quando o browser tem alterações que ainda não estão no ficheiro de backup */
-function estadoBk(){const el=$('#bkState');if(!el)return;const L=listasLocais(),tem=L.buys.length+L.lots.length+L.sales.length+Object.keys(apagados()).length>0||store.get('targets',null)!=null||store.get('policy',null)!=null||Object.keys(notasAtuais()).length>0;
- const sa=Date.parse(store.get('savedAt',null)||''),ref=[store.get('fileSaved',null),D.backup&&(D.backup.saved||D.backup.exported)].map(x=>Date.parse(x||'')).filter(isFinite),ft=ref.length?Math.max(...ref):NaN;
- const pend=tem&&isFinite(sa)&&(!isFinite(ft)||sa>ft+1000);
- el.innerHTML=pend?`<div class="callout warn">${ic('triangle')}<div><b>Some changes are not in the backup file yet.</b> ${AUTO?'Saving them now…':'Automatic saving is off on this page (the browser asks for permission again each time the page is reopened). Click <b>Save to project folder</b> to update bluechip-board-backup.json.'}</div></div>`:
+/* o browser tem dados (entradas, apagamentos, alvos, política ou notas) e alterações mais recentes do que o ficheiro de backup? */
+function temDados(){const L=listasLocais();return L.buys.length+L.lots.length+L.sales.length+Object.keys(apagados()).length>0||store.get('targets',null)!=null||store.get('policy',null)!=null||Object.keys(notasAtuais()).length>0;}
+function refFicheiro(){const ref=[store.get('fileSaved',null),D.backup&&(D.backup.saved||D.backup.exported)].map(x=>Date.parse(x||'')).filter(isFinite);return ref.length?Math.max(...ref):NaN;}
+function pendente(){const sa=Date.parse(store.get('savedAt',null)||''),ft=refFicheiro();return temDados()&&isFinite(sa)&&(!isFinite(ft)||sa>ft+1000);}
+function estadoBk(){const el=$('#bkState');if(!el)return;const tem=temDados(),ft=refFicheiro(),pend=pendente();
+ el.innerHTML=pend?`<div class="callout warn">${ic('triangle')}<div><b>Some changes are not in the backup file yet.</b> ${AUTO?'Saving them now…':FH&&!PEDIU?'Automatic saving is paused: after the page is reopened, the browser needs your permission again. It asks at your next change on this page; or click <b>Save to project folder</b> now to update bluechip-board-backup.json.':FH?'Automatic saving is off: the browser did not allow access to the backup file on this page. Click <b>Save to project folder</b> to update bluechip-board-backup.json.':'Automatic saving is off on this page. Click <b>Save to project folder</b> to update bluechip-board-backup.json.'}</div></div>`:
   (tem&&isFinite(ft)?`<p class="note">${ic('check')}The backup file has all your data${AUTO?'; while this page is open, changes are saved to it automatically':''}.</p>`:'');}
 /* aviso: o ficheiro gravado neste browser não estava na pasta do projeto quando o script correu depois disso */
 function verificaPasta(){const fw=Date.parse(store.get('fileWrittenAt',null)||''),fs=Date.parse(store.get('fileSaved',null)||''),b=D.backup,tb=b?Date.parse(b.saved||b.exported||''):NaN;
@@ -3790,7 +4005,10 @@ function buildBackup(){const ex=$('#bkExport'),im=$('#bkImport');if(!ex||!im)ret
   .catch(()=>bkMsg('That file is not a Bluechip Board backup.'));im.value='';});
  const msgs=[];const m1=carregaDoFicheiro();if(m1)msgs.push(m1);const m2=verificaPasta();if(m2)msgs.push(m2);
  if(msgs.length)bkMsg(msgs.join(' '));
- else if(window.showSaveFilePicker&&window.indexedDB)idb('readonly',s=>s.get('file')).then(h=>{if(h)bkMsg(`Linked to ${h.name}. After opening the page, click Save to project folder once to keep saving there.`);}).catch(()=>{});
+ ligaFicheiro().then(h=>{if(h&&!msgs.length)bkMsg(AUTO?`Linked to ${h.name}: changes on this page are saved there automatically.`:`Linked to ${h.name}. The browser asks for permission again after the page is reopened: at your first change here, or click Save to project folder.`);});
+ /* sair da página com alterações feitas aqui que ainda não estão no ficheiro: o browser pergunta (os dados ficam no browser,
+    mas o ficheiro é a cópia que resiste a limpar o browser) */
+ addEventListener('beforeunload',e=>{if(ALTEROU&&pendente()){e.preventDefault();e.returnValue='';}});
  drawPf();drawLots();drawBuys();estadoBk();}
 
 /* ---------- sources ---------- */
@@ -3803,7 +4021,7 @@ function renderSrc(){const F=arr(D.fontes).slice().sort((a,b)=>(/^ok/.test(a.est
  const M=arr(D.manutencao);$('#manut').innerHTML=M.length?`<div class="callout warn">${ic('refresh')}<div><b>Maintenance:</b> ${M.map(esc).join(' ')}</div></div>`:'';}
 
 /* ---------- horário das bolsas, em hora de Lisboa ---------- */
-function tzParts(t,tz){const o={};new Intl.DateTimeFormat('en-GB',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(t)).forEach(p=>o[p.type]=p.value);return o;}
+function tzParts(t,tz){const o={},f=TZF[tz]||(TZF[tz]=new Intl.DateTimeFormat('en-GB',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}));f.formatToParts(new Date(t)).forEach(p=>o[p.type]=p.value);return o;}
 function tzOffset(t,tz){const p=tzParts(t,tz);return Date.UTC(+p.year,+p.month-1,+p.day,+p.hour,+p.minute,+p.second)-Math.floor(t/1000)*1000;}
 /* hora "de parede" numa bolsa (ex.: 09:30 em Nova Iorque) convertida para um instante real */
 function zoned(y,m,d,hhmm,tz){const q=hhmm.split(':').map(Number),g=Date.UTC(y,m-1,d,q[0],q[1]);let u=g-tzOffset(g,tz);u=g-tzOffset(u,tz);return u;}
@@ -3892,7 +4110,7 @@ function init(){guilloche();renderHero();
  if(window.ResizeObserver)new ResizeObserver(()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);}).observe($('#main'));else addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);});renderAll();renderBolsas();setInterval(renderBolsas,30000);setTopbarH();showTab((location.hash||'#overview').slice(1),false);}
 init();
 /* gancho para os testes automáticos (Tests\Test-Site.ps1): só existe se a página de teste o definir antes */
-if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro});
+if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro,c2,pendente,guardaFicheiro,auto:()=>AUTO,setFH:h=>{FH=h;PEDIU=false;}});
 })();
 </script>
 </body>
@@ -3904,12 +4122,22 @@ if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,f
 # 4. EXECUÇÃO
 # ============================================================================
 
+# Sem -EmailSEC, o e-mail da configuração local (nunca nos argumentos da tarefa agendada nem no git)
+$emailLocal = Get-EmailSecLocal $PSScriptRoot
+if (-not $EmailSEC) {
+    $EmailSEC = $emailLocal.email
+    if ($emailLocal.aviso) { Write-Warning $emailLocal.aviso }
+    elseif (-not $EmailSEC -and -not $AgendarDiariamente) { Write-Host '  ! No SEC e-mail (-SecEmail, bluechip-board.config.json or BLUECHIP_SEC_EMAIL): the SEC sources are skipped.' -ForegroundColor DarkYellow }
+}
+
 if ($AgendarDiariamente) {
     $exe = (Get-Process -Id $PID).Path
     # In a Windows command line, backslashes right before a closing quote must be doubled ("C:\Data\" would swallow the quote)
     $aspas = { param($s) '"' + ($s -replace '(\\+)$', '$1$1') + '"' }
     $argumentos = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File $(& $aspas $PSCommandPath) -NaoAbrir -Dias $Dias -Pasta $(& $aspas $Pasta)"
-    if ($EmailSEC) { $argumentos += " -EmailSEC $(& $aspas $EmailSEC)" }
+    # The SEC e-mail is NOT put in the task's arguments (anyone who can list the tasks or the processes would see it):
+    # each scheduled run reads it from bluechip-board.config.json (or BLUECHIP_SEC_EMAIL), like the launcher does.
+    if ($EmailSEC -and $EmailSEC -ne $emailLocal.email) { Write-Warning "The scheduled task does not store the e-mail given with -SecEmail: each run reads it from bluechip-board.config.json next to the script (or BLUECHIP_SEC_EMAIL). Put it there, or the scheduled runs will skip the SEC sources." }
     $acao = New-ScheduledTaskAction -Execute $exe -Argument $argumentos
     $gatilho = New-ScheduledTaskTrigger -Daily -At ([datetime]::ParseExact($Hora, 'HH:mm', $Script:Inv))
     # Windows' defaults would skip the run on battery power (and stop it when unplugged): this PC is a laptop
@@ -3987,7 +4215,7 @@ foreach ($k in @($vistos.Keys)) {
     if (-not $d -or $d -ge $corte) { $vistosNovos[$k] = $(if ($v -is [datetime]) { ([DateTimeOffset]$v).ToString('o') } else { "$v" }) }
 }
 # (vistos.json is written only at the end, after the website: a run that fails halfway must not mark stories as seen)
-$noticias = @($agrupadas | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true })
+$noticias = @($agrupadas | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true }, @{ Expression = 'chave'; Descending = $false })
 # Histórico de notícias (material e important): lido aqui, escrito só no fim, depois do vistos.json
 $histPath = Join-Path $Pasta 'noticias-historico.json'
 $histLido = Read-HistoricoNoticias $histPath
@@ -4030,7 +4258,8 @@ function New-DadosSerie($Ativo, $Serie, [string]$MoedaPadrao) {
 
 Write-Passo 'Getting 1-year prices'
 $ativosDados = @(foreach ($a in $Ativos) {
-    $s = Get-Serie $a
+    $ref = if ($anterior) { @($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0] } else { $null }
+    $s = Get-Serie $a -Referencia $(if ($ref) { @(Get-PontosGuardados $ref.pontos) } else { $null })
     if (-not $s -and $anterior) { $s = Get-SerieAnterior (@($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0].pontos) "Prices: $($a.Nome)" (@($anterior.ativos | Where-Object { $_.id -eq $a.Id })[0]) }
     New-DadosSerie $a $s $a.Moeda
 })
@@ -4062,14 +4291,14 @@ foreach ($id in @($dividendos.Keys)) {
     $pag = @(Get-PontosGuardados $v.pagamentos)
     $dataPreco = if ($v.precoData -is [datetime]) { ([DateTimeOffset]$v.precoData).ToString('o') } else { "$($v.precoData)" }
     $dividendos[$id] = [pscustomobject]@{
-        id = $id; simbolo = "$($v.simbolo)"; moeda = 'USD'; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))"; obtidoEm = $quando.ToString('o')
+        id = $id; simbolo = "$($v.simbolo)"; moeda = 'USD'; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))"; obtidoEm = $quando.ToString('o')
         anualPorAcao = $anualV; ttmPorAcao = $(if ($null -ne $v.ttmPorAcao) { [double]$v.ttmPorAcao } else { $null }); frequencia = $v.frequencia
         rendimentoPct = $(if ($null -ne $v.rendimentoPct) { [double]$v.rendimentoPct } else { $null })
         ultimo = $(if ($pag.Count) { @($pag[-1][0], $pag[-1][1]) } else { $null }); pagamentos = $pag
         preco = $v.preco; precoData = $dataPreco; nota = "$($v.nota)"; erro = $dividendos[$id].erro
     }
     $f = @($Script:Fontes | Where-Object { $_.nome -like "Dividends: *" -and $_.url -match [regex]::Escape("/chart/$($v.simbolo)?") }) | Select-Object -Last 1
-    if ($f) { $f.estado = "error (showing previous run's data, retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))" }
+    if ($f) { $f.estado = "error (showing previous run's data, retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))" }
 }
 Write-Passo 'Getting Bitcoin indicators (sentiment, dominance, network)'
 $bitcoin = Get-DadosBitcoin
@@ -4136,7 +4365,7 @@ foreach ($s in $SecEmpresas) {
         $lista = @(foreach ($r in @($v.resultados)) { if ($r -and $r.acc) {
             [pscustomobject]@{ acc = "$($r.acc)"; entrega = "$($r.entrega)"; aceite = (ConvertTo-IsoUtc $r.aceite); horaNY = $(if ($r.horaNY) { "$($r.horaNY)" } else { $null }); quando = $(if ($r.quando) { "$($r.quando)" } else { $null }); sessao = $(if ($r.sessao) { "$($r.sessao)" } else { $null }); nota = "$($r.nota)" } } })
         $ult = if ($v.ultimoRelatorio) { [pscustomobject]@{ form = "$($v.ultimoRelatorio.form)"; data = "$($v.ultimoRelatorio.data)"; periodo = "$($v.ultimoRelatorio.periodo)"; acc = "$($v.ultimoRelatorio.acc)" } } else { $null }
-        $resultadosSec[$s.Id] = [pscustomobject]@{ id = $s.Id; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))"; obtidoEm = $quando.ToString('o'); resultados = $lista; ultimoRelatorio = $ult; erro = $motivo; nota = '' }
+        $resultadosSec[$s.Id] = [pscustomobject]@{ id = $s.Id; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))"; obtidoEm = $quando.ToString('o'); resultados = $lista; ultimoRelatorio = $ult; erro = $motivo; nota = '' }
     } else {
         $resultadosSec[$s.Id] = [pscustomobject]@{ id = $s.Id; estado = $(if ($x) { 'error' } else { 'skipped' }); fonte = ''; obtidoEm = $Script:Agora.ToString('o'); resultados = @(); ultimoRelatorio = $null; erro = $motivo; nota = '' }
     }
@@ -4178,10 +4407,14 @@ if ($transferencias -and (Test-Path -LiteralPath $transferencias)) {
     if ($candidatos.Count) {
         $atual = if (Test-Path -LiteralPath $bkPath) { Read-Backup $bkPath } else { $null }
         $tAtual = if ($atual) { Get-InstanteBackup $atual } else { [DateTimeOffset]::MinValue }
+        # a backup "saved" in the future (a wrong clock) would win every comparison forever: it is never used to decide
+        $futuro = $Script:Agora.AddDays(1)
         foreach ($c in $candidatos) {
             $b = Read-Backup $c.FullName
             if (-not $b) { Write-Warning "$($c.Name) in Downloads is not a valid Bluechip Board backup: it was left there and not used."; continue }
-            if ((Get-InstanteBackup $b) -le $tAtual) { continue }   # older than (or same as) the project file: left untouched
+            $tC = Get-InstanteBackup $b
+            if ($tC -gt $futuro) { Write-Warning "$($c.Name) in Downloads says it was saved on $($tC.UtcDateTime.ToString('yyyy-MM-dd HH:mm', $Script:Inv)) UTC, in the future: it was left there and not used. Check the PC's clock."; continue }
+            if ($tC -le $tAtual) { continue }   # older than (or same as) the project file: left untouched
             if (Test-Path -LiteralPath $bkPath) { Copy-Item -LiteralPath $bkPath -Destination (Join-Path $Pasta 'bluechip-board-backup.previous.json') -Force }
             Move-Item -LiteralPath $c.FullName -Destination $bkPath -Force
             Write-Passo "Backup moved from Downloads to $bkNome (the previous file was kept as bluechip-board-backup.previous.json)"
@@ -4193,6 +4426,9 @@ $backup = $null
 if (Test-Path -LiteralPath $bkPath) {
     $backup = Read-Backup $bkPath
     if (-not $backup) { Write-Warning "$bkNome is not a valid Bluechip Board backup and was ignored." }
+    elseif (($tBk = Get-InstanteBackup $backup) -gt $Script:Agora.AddDays(1)) {
+        Write-Warning "$bkNome says it was saved on $($tBk.UtcDateTime.ToString('yyyy-MM-dd HH:mm', $Script:Inv)) UTC, in the future: no backup from Downloads can be newer, so none will be brought in. Check the PC's clock, then save the backup again from the website."
+    }
 }
 
 # Indicadores da área do euro (ECB Data Portal): se falharem, a execução anterior até 30 dias, marcada como tal
@@ -4209,7 +4445,7 @@ foreach ($s in $SeriesMacro) {
             $x = 0.0
             if ($q -and $q.Count -ge 2 -and "$($q[0])" -match '^\d{4}-\d{2}-\d{2}$' -and [double]::TryParse("$($q[1])", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$x)) { , @("$($q[0])", $x) }
         })
-        if ($pts.Count) { $m = [pscustomobject]@{ id = $s.Id; nome = $s.Nome; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd')))"; obtidoEm = $quando.ToString('o'); freq = "$($v.freq)"; pontos = $pts; erro = $m.erro } }
+        if ($pts.Count) { $m = [pscustomobject]@{ id = $s.Id; nome = $s.Nome; estado = 'previous run'; fonte = "previous run (retrieved $($quando.UtcDateTime.ToString('yyyy-MM-dd', $Script:Inv)))"; obtidoEm = $quando.ToString('o'); freq = "$($v.freq)"; pontos = $pts; erro = $m.erro } }
     }
     $macro[$s.Id] = $m
 }
@@ -4236,6 +4472,8 @@ foreach ($b in $Bolsas) {
 }
 $lembReun = Get-LembreteReunioes $Calendario $Script:Agora
 if ($lembReun) { $manutencao.Add($lembReun) }
+$lembUA = Get-LembreteUA $Script:UAChrome $Script:UAData $Script:Agora
+if ($lembUA) { $manutencao.Add($lembUA) }
 $semAlias = @(Get-PosicoesSemAlias $pesosEtfs)
 if ($semAlias.Count) { $manutencao.Add("Top 10 holdings without a news alias (`$AliasesPosicoes): $($semAlias -join '; '). Add an alias with word boundaries and exclusions, so their news is linked to the fund.") }
 foreach ($m in $manutencao) { Write-Host "  ! $m" -ForegroundColor DarkYellow }
@@ -4295,7 +4533,7 @@ function Write-Atomico([string]$Caminho, [string]$Texto) {
 # Cópia datada de cada execução, guardada à parte na pasta Archive (fica só o site mais recente na pasta principal)
 $arquivo = Join-Path $Pasta 'Archive'
 New-Item -ItemType Directory -Force -Path $arquivo | Out-Null
-$ficheiro = Join-Path $arquivo ("bluechip-board-{0}.html" -f (Get-Date).ToString('yyyy-MM-dd_HHmm'))
+$ficheiro = Join-Path $arquivo ("bluechip-board-{0}.html" -f (Get-Date).ToString('yyyy-MM-dd_HHmm', $Script:Inv))
 $ultimo = Join-Path $Pasta 'bluechip-board.html'
 Write-Atomico $ficheiro $htmlArquivo
 Write-Atomico $ultimo $htmlSite
@@ -4304,6 +4542,10 @@ Write-Atomico $vistosPath ($vistosNovos | ConvertTo-Json -Compress)
 if ($histNoticias.estado -eq 'corrupted' -and (Test-Path -LiteralPath $histPath)) { Copy-Item -LiteralPath $histPath -Destination "$histPath.bad" -Force }
 Write-Atomico $histPath ([ordered]@{ versao = 1; inicio = $histNoticias.inicio; dias = $HistoricoDias; noticias = @($histNoticias.itens) } | ConvertTo-Json -Depth 5 -Compress)
 Get-ChildItem -Path $arquivo -Filter 'bluechip-board-2*.html' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
+# e no máximo ~300 MB no total (cada cópia cresce com o histórico de notícias): saem as mais antigas, ficando sempre 5
+$copias = @(Get-ChildItem -Path $arquivo -Filter 'bluechip-board-2*.html' | Sort-Object LastWriteTime -Descending)
+$total = 0; $nCopia = 0
+foreach ($c in $copias) { $total += $c.Length; $nCopia++; if ($nCopia -gt 5 -and $total -gt 300MB) { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction SilentlyContinue } }
 
 $ok = @($Script:Fontes | Where-Object { $_.estado -like 'ok*' }).Count
 $conta = { param($n) @($noticias | Where-Object { $_.nivel -eq $n }).Count }
