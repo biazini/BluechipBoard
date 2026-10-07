@@ -5,7 +5,7 @@ What is still to **decide**, **improve** or **watch**. Everything already done (
 **State on 7 Oct 2026:**
 - Tests: engine 278, site 469, resilience 76, all passing on Windows PowerShell 5.1 and PowerShell 7, locally and in GitHub Actions.
 - A real run takes about one minute, with 79/79 sources answering.
-- The repository is public since 7 Oct 2026: view and download only; issues, wiki, projects and discussions are off; workflow runs from people outside the project need approval. Nothing personal is in it or in its history (checked before publishing).
+- The repository is public since 7 Oct 2026: view and download only; issues, wiki, projects and discussions are off; workflow runs from people outside the project need approval. `main` is protected: changes only through pull requests, merged only when the tests pass (also for the owner), no force-push or deletion; auto-merge and branch deletion after merge are on. Nothing personal is in it or in its history (checked before publishing).
 
 ---
 
@@ -24,7 +24,6 @@ Nothing is broken here: each item needs a choice from you before anything change
 | D7 | **Top-holding news aliases** apply only to feeds without a fixed asset (`Dica`). | Let them override it: more precise, but some existing classifications change (and one engine test must be updated on purpose). |
 | D8 | **Alphabet gross margin** is Unavailable: Alphabet reports no gross profit. | Show revenue − `CostOfRevenue`, marked as derived. |
 | D9 | **Country exposure of SXR8 and EUNN** uses the index country (iShares gives no breakdown), flagged as approximate. | Keep, or find another source. |
-| D10 | **Protecting `main`** (changes only through pull requests, merge only after the tests pass, auto-merge). Free since the repository became public (7 Oct 2026). | Turn it on in the repository settings, or keep merging by hand. |
 
 ---
 

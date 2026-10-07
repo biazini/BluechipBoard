@@ -307,7 +307,7 @@ flowchart LR
     F --> G[git switch main, git pull,<br/>git branch -d name]
 ```
 
-`git status` must never list your backup, the config file or an output. Use `git log` and `git revert <commit>` to go back: your data is not affected.
+`main` is protected: every change goes through a pull request and is merged only when the tests pass (with auto-merge, it merges by itself then, and the branch is deleted). `git status` must never list your backup, the config file or an output. Use `git log` and `git revert <commit>` to go back: your data is not affected.
 
 ### Making a change safely
 
