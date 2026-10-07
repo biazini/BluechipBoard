@@ -544,35 +544,36 @@ function Read-Feed {
 # Classifica uma notícia: empresas, temas, nível de impacto, sentimento e tipo de fonte
 function Measure-Noticia($N) {
     $txt = "$($N.titulo)"
-    $emp = New-Object System.Collections.Generic.List[string]
-    foreach ($k in $EmpresasRe.Keys) { if ($txt -match $EmpresasRe[$k]) { $emp.Add($k) } }
+    # (listas do PowerShell e operadores -ccontains, sensíveis a maiúsculas como List.Contains: no PowerShell 7 cada
+    # chamada a um método .NET custa ~10 µs, ver $DupVazias)
+    $emp = @(foreach ($k in $EmpresasRe.Keys) { if ($txt -match $EmpresasRe[$k]) { $k } })
     # Without a keyword, the story goes to the feed's asset. Aggregated feeds (Google News, Yahoo Finance) return many
     # general stories ("China's AI agents…" in an Apple search), so there this is only a weak match: no company bonus
     # and at most "moderate". Primary feeds (newsrooms, SEC, Fed, ECB) keep the full assignment.
-    $soPeloFeed = $false; $viaPosicao = New-Object System.Collections.Generic.List[string]
-    if ($emp.Count -eq 0 -and $N.dica) { $emp.Add($N.dica); $soPeloFeed = ("$($N.feed)" -match '^(Google News|Yahoo Finance)') }
+    $soPeloFeed = $false; $viaPosicao = @()
+    if ($emp.Count -eq 0 -and $N.dica) { $emp = @("$($N.dica)"); $soPeloFeed = ("$($N.feed)" -match '^(Google News|Yahoo Finance)') }
     # Sem palavra de nenhum ativo e num feed sem ativo próprio (feeds gerais, que antes deixavam cair a notícia): uma das
     # maiores posições de um fundo ($AliasesPosicoes) liga a notícia a esse fundo, como correspondência fraca (no máximo
     # "moderada", sem bónus). Os feeds com ativo próprio mantêm a atribuição de sempre.
     if ($emp.Count -eq 0) {
         foreach ($f in $AliasesPosicoes.Keys) {
             foreach ($a in @($AliasesPosicoes[$f])) {
-                if ($a -and $txt -match $a.Re) { if (-not $emp.Contains($f)) { $emp.Add($f) }; if (-not $viaPosicao.Contains($a.Nome)) { $viaPosicao.Add($a.Nome) } }
+                if ($a -and $txt -match $a.Re) { if ($emp -cnotcontains $f) { $emp += "$f" }; if ($viaPosicao -cnotcontains $a.Nome) { $viaPosicao += "$($a.Nome)" } }
             }
         }
     }
     if ($emp.Count -eq 0) { return $null }
-    if ($N.exigir -and -not $emp.Contains($N.exigir)) { return $null }   # feed temático: o título tem de ser sobre o ativo
-    if ($emp.Contains('SXR8') -and -not $emp.Contains('MKT')) { $emp.Add('MKT') }
+    if ($N.exigir -and $emp -cnotcontains $N.exigir) { return $null }   # feed temático: o título tem de ser sobre o ativo
+    if ($emp -ccontains 'SXR8' -and $emp -cnotcontains 'MKT') { $emp += 'MKT' }
 
     # Themes: the strongest counts in full and each extra one at half, up to 5 points. (Adding them all, up to 7,
     # let a headline that merely mentions AI, chips and China reach "material" with no adverse event.)
-    $achados = New-Object System.Collections.Generic.List[string]
-    $pesos = New-Object System.Collections.Generic.List[double]
-    foreach ($t in $Temas) { if ($txt -match $t.Re) { $achados.Add($t.Nome); $pesos.Add($t.Peso) } }
-    if ($N.extraTema -and -not $achados.Contains($N.extraTema)) { $achados.Insert(0, $N.extraTema); $pesos.Add($N.extraPeso) }
-    $score = 0.0; $i = 0
-    foreach ($w in @($pesos | Sort-Object -Descending)) { $score += $(if ($i -eq 0) { $w } else { $w / 2 }); $i++ }
+    $achados = @(); $pesos = @()
+    foreach ($t in $Temas) { if ($txt -match $t.Re) { $achados += "$($t.Nome)"; $pesos += [double]$t.Peso } }
+    if ($N.extraTema -and $achados -cnotcontains $N.extraTema) { $achados = @("$($N.extraTema)") + $achados; $pesos += [double]$N.extraPeso }
+    # o mais forte conta inteiro e cada um dos outros a metade (= máximo + (soma − máximo) ÷ 2; os pesos são múltiplos de 0,5)
+    $score = 0.0
+    if ($pesos.Count) { $mx = $pesos[0]; $soma = 0.0; foreach ($w in $pesos) { $soma += $w; if ($w -gt $mx) { $mx = $w } }; $score = $mx + ($soma - $mx) / 2 }
     if ($score -gt 5) { $score = 5 }
     $eSevero = $txt -match $Severo
     if ($eSevero) { $score += 3 }
@@ -582,7 +583,8 @@ function Measure-Noticia($N) {
     $src = ('{0} {1}' -f $N.fonte, $N.dominio).ToLowerInvariant()
     $tier = if ($src -match $TierPrimaria) { 'primaria' } elseif ($src -match $TierCuidado) { 'cuidado' } elseif ($src -match $TierReferencia) { 'referencia' } else { 'outra' }
     switch ($tier) { 'primaria' { $score += 1.5 } 'referencia' { $score += 1 } 'cuidado' { $score -= 1.5 } }
-    if (-not $soPeloFeed -and -not $viaPosicao.Count -and @($emp | Where-Object { $_ -in 'AAPL', 'NVDA', 'GOOGL', 'BTC' }).Count -gt 0) { $score += 1 }
+    $bonus = $false; foreach ($e in $emp) { if ($e -in 'AAPL', 'NVDA', 'GOOGL', 'BTC') { $bonus = $true } }
+    if (-not $soPeloFeed -and -not $viaPosicao.Count -and $bonus) { $score += 1 }
     if ($eRuido) { $score -= 3 }
 
     $nivel = if ($eRuido -and $tier -ne 'primaria') { 'white' } elseif ($score -ge 7) { 'red' } elseif ($score -ge 4) { 'orange' } elseif ($score -ge 2) { 'yellow' } else { 'white' }
@@ -1013,7 +1015,10 @@ $DupVazias = @('a','an','the','and','or','but','of','to','in','on','at','for','w
     'de','da','do','das','dos','e','o','os','as','um','uma','uns','umas','em','no','na','nos','nas','por','para','com','sem','que','se','ao','aos','sao','foi','como','mais','menos','sobre',
     'vs','via','here','there','their','his','her','he','she','they','we','you','your','our','us','watch','update','exclusive','breaking','video','live','analysis','opinion',
     'stock','stocks','share','shares','acoes','acao','today','hoje','best','top','guide','ranking','things','ways','reasons')
-$DupVazias = New-Object 'System.Collections.Generic.HashSet[string]' (,[string[]]$DupVazias)
+# Tabela do PowerShell consultada pelo índice ($DupVazias[$w]), não um HashSet: no PowerShell 7 cada chamada a um método
+# .NET (HashSet.Contains, List.Add, String.EndsWith…) passa pelo registo AMSI do Windows e custa cerca de 10 µs, o que nos
+# ciclos sobre milhares de palavras somava segundos. Os índices e os operadores (-match, -replace) não têm esse custo.
+$vaziasH = @{}; foreach ($w in $DupVazias) { $vaziasH[$w] = $true }; $DupVazias = $vaziasH
 $DupSinonimos = @{}
 foreach ($grupo in @(
         @('launch','unveil','announce','introduce','debut','release','roll','lanca','apresenta','anuncia'),
@@ -1037,35 +1042,41 @@ function Get-PalavrasTitulo([string]$Titulo) {
     $s = $s -replace '\b(\d+(?:[.,]\d+)?)\s?(billion|bn|bilioes|mil milhoes)\b', '${1}b ' -replace '\b(\d+(?:[.,]\d+)?)\s?(million|mln|milhoes)\b', '${1}m '
     $s = $s -replace '(\d),(\d)', '$1.$2'
     $s = $s -replace '\s[-–—|]\s[^-–—|]{2,40}$', '' -replace '\s(por|by)\s(reuters|investing\.com)$', ''
-    $out = New-Object 'System.Collections.Generic.HashSet[string]'
-    foreach ($m in [regex]::Matches($s, '[a-z0-9][a-z0-9.\-]*')) {
-        $w = $m.Value.Trim('.', '-')
-        if (($w.Length -lt 2 -and $w -notmatch '^\d+$') -or $DupVazias.Contains($w)) { continue }
+    # Devolve as palavras distintas pela ordem em que aparecem (a ordem decide os empates do agrupamento). Só operadores e
+    # índices dentro do ciclo (ver $DupVazias): o sufixo sai com uma expressão regular equivalente ao ciclo anterior (o
+    # primeiro de ings, ing, edly, ed, es, s que deixe pelo menos 4 letras), as pontas "." e "-" com outra.
+    $vistas = @{}
+    $palavras = @(foreach ($m in [regex]::Matches($s, '[a-z0-9][a-z0-9.\-]*')) {
+        $w = $m.Value -replace '^[.\-]+|[.\-]+$', ''
+        if (($w.Length -lt 2 -and $w -notmatch '^\d+$') -or $DupVazias[$w]) { continue }
         if ($w -notmatch '\d') {
-            foreach ($suf in 'ings', 'ing', 'edly', 'ed', 'es', 's') {
-                if ($w.Length -gt $suf.Length + 3 -and $w.EndsWith($suf)) { $w = $w.Substring(0, $w.Length - $suf.Length); break }
-            }
-            if ($DupSinonimos.ContainsKey($w)) { $w = $DupSinonimos[$w] }
+            $w = $w -replace '^(.{4,}?)(?:ings|ing|edly|ed|es|s)$', '$1'
+            $sin = $DupSinonimos[$w]; if ($sin) { $w = $sin }
         }
-        [void]$out.Add($w)
-    }
-    return , $out
+        if (-not $vistas[$w]) { $vistas[$w] = $true; $w }
+    })
+    return , $palavras
 }
 
 function Join-NoticiasDuplicadas($Lista) {
-    $L = @($Lista | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true })
+    # desempate pela chave (o título normalizado, único): sem ele a ordem dos empates dependia da ordem da tabela de origem
+    # (aleatória entre execuções no PowerShell 7) e do algoritmo de ordenação (diferente no 5.1), e os grupos mudavam com ela
+    $L = @($Lista | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true }, @{ Expression = 'chave'; Descending = $false })
     $n = $L.Count
     if ($n -lt 2) { return $L }
-    $tok = New-Object object[] $n; $nums = New-Object object[] $n; $emp = New-Object object[] $n; $t = New-Object object[] $n
+    # (só índices e operadores nos ciclos: ver $DupVazias. $tokH[i] = as palavras do título i, para consultas pelo índice;
+    # $dia[i] = o instante em ticks, para comparar sem chamar métodos)
+    $tok = New-Object object[] $n; $tokH = New-Object object[] $n; $nums = New-Object object[] $n; $emp = New-Object object[] $n; $t = New-Object object[] $n; $dia = New-Object object[] $n
     $df = @{}; $post = @{}
     for ($i = 0; $i -lt $n; $i++) {
         $tok[$i] = Get-PalavrasTitulo $L[$i].titulo
-        $nums[$i] = @($tok[$i] | Where-Object { $_ -match '\d' })
-        $emp[$i] = @($L[$i].empresas | Where-Object { $_ -ne 'MKT' })
+        $th = @{}; foreach ($w in $tok[$i]) { $th[$w] = $true }; $tokH[$i] = $th
+        $nums[$i] = @(foreach ($w in $tok[$i]) { if ($w -match '\d') { $w } })
+        $emp[$i] = @(foreach ($e in @($L[$i].empresas)) { if ($e -ne 'MKT') { $e } })
         $t[$i] = if ($L[$i].data) { [DateTimeOffset]::Parse($L[$i].data, $Script:Inv) } else { $null }
+        $dia[$i] = if ($t[$i]) { $t[$i].UtcTicks } else { $null }
         foreach ($w in $tok[$i]) {
-            if ($df.ContainsKey($w)) { $df[$w]++ } else { $df[$w] = 1; $post[$w] = New-Object System.Collections.Generic.List[int] }
-            $post[$w].Add($i)
+            if ($df[$w]) { $df[$w]++; $post[$w] += , $i } else { $df[$w] = 1; $post[$w] = @($i) }
         }
     }
     $idf = @{}; foreach ($w in $df.Keys) { $idf[$w] = [math]::Log(($n + 1) / ($df[$w] + 0.5)) }
@@ -1076,15 +1087,15 @@ function Join-NoticiasDuplicadas($Lista) {
     # Medidas de semelhança entre duas notícias, ou $null quando não podem ser a mesma
     $medir = {
         param($a, $b)
-        if ($t[$a] -and $t[$b] -and [math]::Abs(($t[$a] - $t[$b]).TotalDays) -gt 3) { return $null }      # mais de 3 dias de distância
+        if ($null -ne $dia[$a] -and $null -ne $dia[$b] -and ($dia[$a] - $dia[$b] -gt 2592000000000 -or $dia[$b] - $dia[$a] -gt 2592000000000)) { return $null }      # mais de 3 dias de distância (em ticks: exato)
         if ($emp[$a].Count -and $emp[$b].Count) { $comum = $false; foreach ($e in $emp[$a]) { if ($emp[$b] -contains $e) { $comum = $true } }; if (-not $comum) { return $null } }   # empresas diferentes
         $soA = 0; foreach ($x in $nums[$a]) { if ($nums[$b] -notcontains $x) { $soA++ } }
         $soB = 0; foreach ($x in $nums[$b]) { if ($nums[$a] -notcontains $x) { $soB++ } }
         if ($soA -and $soB) { return $null }                                                               # números diferentes (datas, valores)
         $k = 0; $ms = 0.0; $nr = 0
-        foreach ($w in $tok[$a]) { if ($tok[$b].Contains($w)) { $k++; $ms += $idf[$w]; if ($df[$w] -le $raro) { $nr++ } } }
+        $hb = $tokH[$b]; foreach ($w in $tok[$a]) { if ($hb[$w]) { $k++; $ms += $idf[$w]; if ($df[$w] -le $raro) { $nr++ } } }
         if (-not $k) { return $null }
-        @{ n = $k; ms = $ms; nr = $nr; wj = $ms / ($massa[$a] + $massa[$b] - $ms); ov = $ms / [math]::Min($massa[$a], $massa[$b]) }
+        @{ n = $k; ms = $ms; nr = $nr; wj = $ms / ($massa[$a] + $massa[$b] - $ms); ov = $ms / $(if ($massa[$a] -lt $massa[$b]) { $massa[$a] } else { $massa[$b] }) }
     }
     $forte = { param($f) $f -and $f.n -ge 3 -and ($f.wj -ge 0.5 -or ($f.ov -ge 0.75 -and $f.wj -ge 0.3 -and $f.ms -ge 11 -and $f.n -ge 4) -or ($f.nr -ge 2 -and $f.ov -ge 0.6 -and $f.wj -ge 0.2 -and $f.n -ge 4)) }
     $fraca = { param($f) $f -and ($f.wj -ge 0.2 -or ($f.nr -ge 2 -and $f.ov -ge 0.5)) }
@@ -1092,11 +1103,12 @@ function Join-NoticiasDuplicadas($Lista) {
     # Pares candidatos: só os que partilham 3 ou mais palavras (índice invertido, evita comparar tudo com tudo)
     $viz = New-Object object[] $n
     for ($i = 0; $i -lt $n; $i++) { $viz[$i] = New-Object 'System.Collections.Generic.HashSet[int]' }
-    $conta = New-Object int[] $n
+    $conta = New-Object int[] $n; $tocados = New-Object int[] $n
     for ($i = 0; $i -lt $n; $i++) {
-        $tocados = New-Object System.Collections.Generic.List[int]
-        foreach ($w in $tok[$i]) { foreach ($j in $post[$w]) { if ($j -gt $i) { if ($conta[$j] -eq 0) { $tocados.Add($j) }; $conta[$j]++ } } }
-        foreach ($j in $tocados) {
+        $nt = 0   # $tocados[0..nt-1]: as notícias seguintes que partilham palavras com i, pela ordem em que aparecem
+        foreach ($w in $tok[$i]) { foreach ($j in $post[$w]) { if ($j -gt $i) { if ($conta[$j] -eq 0) { $tocados[$nt] = $j; $nt++ }; $conta[$j]++ } } }
+        for ($q = 0; $q -lt $nt; $q++) {
+            $j = $tocados[$q]
             if ($conta[$j] -ge 3 -and (& $forte (& $medir $i $j))) { [void]$viz[$i].Add($j); [void]$viz[$j].Add($i) }
             $conta[$j] = 0
         }
@@ -4166,7 +4178,7 @@ foreach ($k in @($vistos.Keys)) {
     if (-not $d -or $d -ge $corte) { $vistosNovos[$k] = $(if ($v -is [datetime]) { ([DateTimeOffset]$v).ToString('o') } else { "$v" }) }
 }
 # (vistos.json is written only at the end, after the website: a run that fails halfway must not mark stories as seen)
-$noticias = @($agrupadas | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true })
+$noticias = @($agrupadas | Sort-Object -Property @{ Expression = 'score'; Descending = $true }, @{ Expression = 'data'; Descending = $true }, @{ Expression = 'chave'; Descending = $false })
 # Histórico de notícias (material e important): lido aqui, escrito só no fim, depois do vistos.json
 $histPath = Join-Path $Pasta 'noticias-historico.json'
 $histLido = Read-HistoricoNoticias $histPath

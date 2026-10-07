@@ -776,6 +776,15 @@ $c500 = $Script:Chamadas
 Remove-Item function:Invoke-WebRequest, function:Start-Sleep
 Check 'download: a permanent answer (404) is not retried; a server error (500) is retried once' ($c404 -eq 1 -and $c500 -eq 2) "404: $c404 call(s), 500: $c500"
 
+# --- agrupamento de duplicadas: palavras (o mesmo resultado do ciclo de antes) e resultado independente da ordem de entrada ---
+$pal = { param($t) (@((Get-PalavrasTitulo $t) | ForEach-Object { $_ })) -join ' ' }
+Check 'title words: accents, curly apostrophes, amounts, suffixes (stem of 4+ letters), synonyms and stop words, in order' ((& $pal ("California man$([char]0x2019)s smuggling of `$300 million in Nvidia chips: shares tumble – Reuters")) -eq 'california man smuggle 300m nvidia chip fall' -and (& $pal 'Ações da Apple sobem; things rallies kings -ASML- u.s.') -eq 'apple sobem ralli king asml u.s') "$(& $pal ("California man$([char]0x2019)s smuggling of `$300 million in Nvidia chips: shares tumble – Reuters")) / $(& $pal 'Ações da Apple sobem; things rallies kings -ASML- u.s.')"
+$k = 0; $base = @(foreach ($tt in @($Fundo + @('Nvidia shares rise after strong data center sales', 'Nvidia shares rise after strong data center sales growth', 'Nvidia shares rise on strong data center sales'))) { $m = Noticia $tt; if ($m) { $m.data = '2026-09-25T09:00:00.0000000+00:00'; $m.score = 3; $m.chave = "t$k"; $k++; $m } })
+$sig = { param($g) (@($g | ForEach-Object { "$($_.chave)<" + ((@($_.outras | ForEach-Object { $_.chave }) | Sort-Object) -join ',') }) | Sort-Object) -join ';' }
+$copia = { param($x) @(foreach ($m in $x) { $c = $m.PSObject.Copy(); $c.outras = @(); $c }) }
+$a1 = & $sig @(Join-NoticiasDuplicadas (& $copia $base)); [array]::Reverse($base); $a2 = & $sig @(Join-NoticiasDuplicadas (& $copia $base))
+Check 'duplicate grouping does not depend on the order of the input (ties in score and date broken by the title key)' ($a1 -eq $a2 -and $a1 -match '<t\d+') "$a1 | $a2"
+
 # --- iShares: mudança de formato do ficheiro dita na fonte ---
 ${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) return $Script:Ficheiros['251861'] }
 $Script:Ficheiros['251861'] = (iShares 'IE00B4K48X80' $linhasEU).Replace('>Market Currency<', '>Currency X<')
