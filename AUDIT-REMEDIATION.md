@@ -6,7 +6,7 @@ Record of the fixes made after the technical audit of Bluechip Board, carried ou
 
 **How to read this file.** The **[follow-up of 7 Oct 2026](#post-remediation-follow-up--7-oct-2026)** (at the end) re-checked every finding below, fixed what could be fixed and records the decisions; the rows of Open items it changed carry a "7 Oct 2026" note. Start with **[Open items](#open-items--6-oct-2026)**: everything still to decide, fix or watch, in one place. The audit sections (Critical to Testing gap) record the state on 4 Oct 2026 and are kept as they were written. Later work is in the dated change logs at the end. The [status review](#status-review--5-oct-2026) says which audit findings still applied on 5 Oct.
 
-**Current test counts (7 Oct 2026, with live prices):** engine 278, site 462, resilience 73, all passing on Windows PowerShell 5.1 and PowerShell 7 (after the remediation: 251, 436, 62; 6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
+**Current test counts (7 Oct 2026, with live prices):** engine 278, site 463, resilience 73, all passing on Windows PowerShell 5.1 and PowerShell 7 (after the remediation: 251, 436, 62; 6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
 
 **Test suites at the end of the remediation** (all in `Tests\`, see the README):
 
