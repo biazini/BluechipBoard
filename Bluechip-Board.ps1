@@ -2135,6 +2135,7 @@ h2{font-family:var(--font-read);font-weight:500;font-size:clamp(1.6rem,2.6vw,2.1
 .empty{padding:22px 18px;color:var(--muted);font-size:.9rem;display:flex;align-items:center;gap:8px}
 .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));overflow:hidden}
 .kpi{padding:16px 18px;border-left:1px solid var(--rule);min-width:0}
+#btcKpis{grid-template-columns:repeat(5,minmax(0,1fr))}   /* Bitcoin: preço, hoje, 7 dias, volatilidade e próximo halving */
 .kpi:first-child{border-left:0}
 .kpi .k{display:flex;align-items:center;gap:6px;font-size:.7rem;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:var(--muted)}
 .kpi .k .i{width:14px;height:14px;color:var(--faint)}
@@ -2404,6 +2405,7 @@ td small{color:var(--muted);font-weight:500;margin-left:4px}
  .grid3,.btc-grid,.grid2{grid-template-columns:minmax(0,1fr)}
  .kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
  .kpi:nth-child(3){border-left:0}.kpi:nth-child(n+3){border-top:1px solid var(--rule)}
+ #btcKpis{grid-template-columns:repeat(2,minmax(0,1fr))}#btcKpis .kpi:nth-child(5){grid-column:1/-1;border-left:0}
  .method{grid-template-columns:minmax(0,1fr)}
  .foot{flex-direction:column}}
 @media (max-width:720px){
@@ -3307,13 +3309,24 @@ function corr(a,b){const mb=new Map(b.map(p=>[p[0],p[1]])),c=a.filter(p=>mb.has(
  const x=[],y=[];for(let i=1;i<w.length;i++){x.push(Math.log(w[i][1]/w[i-1][1]));y.push(Math.log(mb.get(w[i][0])/mb.get(w[i-1][0])));}
  const mx=x.reduce((s,v)=>s+v,0)/x.length,my=y.reduce((s,v)=>s+v,0)/y.length;let sxy=0,sxx=0,syy=0;x.forEach((v,i)=>{sxy+=(v-mx)*(y[i]-my);sxx+=(v-mx)*(v-mx);syy+=(y[i]-my)*(y[i]-my);});return sxx&&syy?sxy/Math.sqrt(sxx*syy):null;}
 const grande=v=>v==null||!isFinite(v)?'—':v>=1e12?nf(v/1e12,2)+' trillion':v>=1e9?nf(v/1e9,1)+' billion':nf(v/1e6,0)+' million';
+/* próximo halving: a data prevista pela rede nesta execução (mempool.space, ao ritmo dos blocos desde o último halving); sem a
+   rede, a estimativa grosseira do calendário (10 minutos por bloco desde o último halving conhecido), dita como tal */
+function proxHalving(){const rd=D.bitcoin&&D.bitcoin.rede,t=rd?Date.parse(rd.halvingPrevisto):NaN;
+ if(isFinite(t))return{t,aprox:false,bloco:+rd.halvingAltura};
+ const e=calendar().find(x=>x.e==='BTC'&&/halving/i.test(x.ev||''));return e?{t:e.t,aprox:true,bloco:null}:null;}
+/* contagem decrescente no indicador "Next halving" (atualizada a cada minuto com a página aberta) */
+function contaHalving(){const el=$('#k-halv');if(!el)return;const h=proxHalving(),dd=h?Math.max(0,Math.ceil((h.t-Date.now())/DAY)):null;
+ el.innerHTML=`<div class="k">${ic('clock')}Next halving</div><div class="v">${dd!=null?nf(dd,0)+(dd===1?' day':' days'):'—'}</div><div class="s">${h?`≈ ${fdt(h.t)} · ${h.aprox?'rough estimate':'forecast'}`:'no network data in this run'}</div>`;
+ el.title=h?(h.aprox?'Rough estimate: 210,000 blocks of 10 minutes after the last known halving (the network data failed in this run).':`Forecast at the average block time since the last halving${h.bloco?` (block ${nf(h.bloco,0)})`:''}. The real date can move by days or weeks.`):'';}
 function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.mercado,fg=B.sentimento,rd=B.rede,p=a?a.pts:[],s=stats(p),fx=FX.length?FX[FX.length-1][1]:null;
  $('#btcLead').textContent=`Bitcoin trades 24 hours a day, 7 days a week, and is tracked here in euros (BTC/EUR).${s?` Last price: €${nf(s.last,0)}; ${pct(s.m1)} over a month, ${pct(s.y1)} over a year and ${pct(s.dist)} from its 52-week high.`:' No prices in this run: see the Sources section.'}`;
  const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,m24=!!(m&&m.var24!=null&&isFinite(m.var24)),v24=m24?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
  $('#btcKpis').innerHTML=k('bitcoin','Price',s?'€'+nf(s.last,0):(m?'€'+nf(m.eur,0):'—'),m&&m.usd?`≈ $${nf(m.usd,0)}`:(s&&fx?`≈ $${nf(s.last*fx,0)}`:'in euros'))+
   k('clock',m24?'24 hours':'Today (UTC)',pct(v24),m24?'change over the last 24 h':'since 00:00 UTC',cls(v24))+
   k('calendar','7 days',pct(w1),s?`30 days: ${pct(s.m1)}`:'',cls(w1))+
-  k('activity','Volatility',s&&s.vol!=null?nf(s.vol,0)+'%':'—',`annualised, 30 days${gs&&gs.vol!=null?` · S&amp;P 500: ${nf(gs.vol,0)}%`:''}`);
+  k('activity','Volatility',s&&s.vol!=null?nf(s.vol,0)+'%':'—',`annualised, 30 days${gs&&gs.vol!=null?` · S&amp;P 500: ${nf(gs.vol,0)}%`:''}`)+
+  `<div class="kpi" id="k-halv"></div>`;
+ contaHalving();
  const sl=slice(p),t0=sl.length?sl[0][0]:0,cut=x=>x.filter(q=>q[0]>=t0),ch=sl.length>1?(sl[sl.length-1][1]/sl[0][1]-1)*100:null;
  $('#k-btc').innerHTML=s?`<span class="mk-v">€${nf(s.last,0)}</span><span class="mk-c ${cls(ch)}">${pct(ch)} over the period</span>`:'';
  lineMulti($('#ch-btc'),[{n:'Bitcoin',c:'var(--btc)',pts:sl},{n:'50-day average',c:'var(--muted)',pts:cut(mm(p,50))},{n:'200-day average',c:'var(--accent)',pts:cut(mm(p,200))}],{dec:0,tdec:0,unit:' €',h:360,label:'Bitcoin price in euros'});
@@ -3321,7 +3334,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
   $('#btcSent').innerHTML=`<div class="big-v"><b>${v}</b><span style="color:${col}">${esc(fg.classe)}</span></div><div class="fng-bar" role="img" aria-label="Index at ${v} out of 100"><i style="left:${Math.max(0,Math.min(100,v))}%"></i></div><div class="fng-lbl"><span>Extreme fear</span><span>Neutral</span><span>Extreme greed</span></div><ul class="kv"><li>A week ago<b>${antes(7)}</b></li><li>A month ago<b>${antes(30)}</b></li></ul>`;
   lineMulti($('#ch-fng'),[{n:'Fear & Greed',c:'var(--btc)',pts:slice(sp)}],{dec:0,h:170,ref:50,refLabel:'neutral',label:'Fear & Greed Index over the period'});}
  else{empty($('#btcSent'),'No sentiment data in this run.');$('#ch-fng').innerHTML='';}
- if(rd){const tH=Date.parse(rd.halvingPrevisto),dd=Math.max(0,Math.round((tH-Date.now())/DAY)),ini=rd.halvingAltura-210000,pr=Math.max(0,Math.min(100,(rd.altura-ini)/210000*100)),bt=x=>String(x);
+ if(rd){const tH=Date.parse(rd.halvingPrevisto),dd=Math.max(0,Math.ceil((tH-Date.now())/DAY)),ini=rd.halvingAltura-210000,pr=Math.max(0,Math.min(100,(rd.altura-ini)/210000*100)),bt=x=>String(x);
   $('#btcHalv').innerHTML=`<div class="big-v"><b>${nf(dd,0)}</b><span class="muted">days (forecast)</span></div><div class="prog" role="img" aria-label="${nf(pr,1)}% of the current cycle"><i style="width:${pr}%"></i></div><div class="fng-lbl"><span>Block ${nf(ini,0)}</span><span>${nf(pr,1)}% of the cycle</span><span>${nf(rd.halvingAltura,0)}</span></div><ul class="kv"><li>Expected date<b>${isFinite(tH)?fdt(tH):'—'}</b></li><li>Remaining<b>${nf(rd.blocosFalta,0)} blocks</b></li><li>Block reward<b>${bt(rd.recompensa)} → ${bt(rd.recompensaNova)} BTC</b></li></ul>`;}
  else empty($('#btcHalv'),'No network data in this run.');
  const R=[];if(rd){R.push(['Current block',nf(rd.altura,0)],['Average block time',nf(rd.minBloco,1)+' min'+(rd.minBlocoEpoca?` · ${nf(rd.minBlocoEpoca,2)} min since the last halving (used for the forecast)`:'')],['Hash rate',rd.hashrateEH!=null?nf(rd.hashrateEH,0)+' EH/s':'—']);if(rd.ajusteDif!=null)R.push(['Next difficulty adjustment',pct(rd.ajusteDif)+(rd.ajusteData?' · '+fdt(Date.parse(rd.ajusteData)):'')]);}
@@ -4320,10 +4333,10 @@ function init(){guilloche();renderHero();
  addEventListener('hashchange',()=>showTab(location.hash.slice(1),false));
  addEventListener('resize',setTopbarH);setTopbarH();
  const redraw=()=>{const w=$('#main').clientWidth;if(w&&Math.abs(w-lastW)>2){lastW=w;if(CHARTS[curTab])CHARTS[curTab]();}};
- if(window.ResizeObserver)new ResizeObserver(()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);}).observe($('#main'));else addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);});renderAll();renderBolsas();setInterval(renderBolsas,30000);ligaVivo();setTopbarH();showTab((location.hash||'#overview').slice(1),false);}
+ if(window.ResizeObserver)new ResizeObserver(()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);}).observe($('#main'));else addEventListener('resize',()=>{clearTimeout(rsz);rsz=setTimeout(redraw,120);});renderAll();renderBolsas();setInterval(renderBolsas,30000);setInterval(contaHalving,60000);ligaVivo();setTopbarH();showTab((location.hash||'#overview').slice(1),false);}
 init();
 /* gancho para os testes automáticos (Tests\Test-Site.ps1): só existe se a página de teste o definir antes */
-if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro,c2,pendente,guardaFicheiro,auto:()=>AUTO,setFH:h=>{FH=h;PEDIU=false;},vivo:{aplica:aplicaVivo,ponto:pontoVivo,redesenha:redesenhaVivo,estado:estadoVivo,VIVO,tPrecos:()=>T_PRECOS,set:o=>{if("ja" in o)vivoJa=o.ja;if("falhas" in o)vivoFalhas=o.falhas;}}});
+if(typeof window.__BB_TEST__==='function')window.__BB_TEST__({stats,inCur,fxAt,fx:()=>({FX,FXSRC}),frescura,ajusteSplit,efetiva,carteira,pfDados,juntaBackup,limpaBackup,precoEurEm,store,alerts,SPLITS,diasAte,regras,sessao,lastEur,ATIVOS,HIST,apaga,migraCompras,estadoBk,verificaPasta,quedas,fxPt,divDados,dividendos,anexoJ,exportaAnexoJ,csvTxt,csvNum,ANEXO_J,fxRef,ETF_IDS,ehEtf,etfInfo,escolheEtf,etfSel:()=>etfSel,PF,DIV_IDS,BOLSA_DE,CO,simKey,simular,rentab,xirr,isoU,pct,stress,EPISODIOS,estrategias,eur,rolar,underwater,nf,exposicao,CONC_LIMIAR,simulaVenda,feeDe,alocacao,reparte,mesesBanda,dadosBackup,limpaAlvos,anexo8A,divPagamentos,expoNoticias,relevancia,NEWS,sessaoDe,grandesMovimentos,reacoes,eventosGrafico,HN,fundDados,valorEm,ttmEm,fundHistorico,percentil,renderFund,macroDados,renderMacro,c2,pendente,guardaFicheiro,auto:()=>AUTO,setFH:h=>{FH=h;PEDIU=false;},proxHalving,contaHalving,calendar,fdt,D,vivo:{aplica:aplicaVivo,ponto:pontoVivo,redesenha:redesenhaVivo,estado:estadoVivo,VIVO,tPrecos:()=>T_PRECOS,set:o=>{if("ja" in o)vivoJa=o.ja;if("falhas" in o)vivoFalhas=o.falhas;}}});
 })();
 </script>
 </body>
