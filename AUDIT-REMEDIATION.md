@@ -83,6 +83,16 @@ Nothing is broken here: each item needs a choice from you before anything change
 
 ## 5. Upkeep calendar
 
+```mermaid
+timeline
+    title Upkeep calendar
+    Every few months : ETF reference weights
+    About every 8 months : Browser identity (Chrome version)
+    Every year, before the IRS : Check the Anexo J mapping
+    By Oct 2027 : Fed and ECB decisions of 2028
+    By Jan 2028 : Exchange holiday exceptions for 2028
+```
+
 | When | What |
 |---|---|
 | Every few months | Refresh `$PesosReferencia` and each `Referencia` in `$ETFs` (reminder after 4 months). |
