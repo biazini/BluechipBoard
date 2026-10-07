@@ -43,33 +43,36 @@ After a run without errors, the launcher starts a hidden background process (`Bl
 %%{init: {'sequence': {'mirrorActors': false}}}%%
 sequenceDiagram
     autonumber
-    actor U as You
-    box transparent This PC
-        participant L as Launcher
-        participant B as Page in the browser
-        participant P as Live process<br/>127.0.0.1:47821
+    participant U as User
+    box transparent Local machine
+        participant L as Launcher<br/>Start-BluechipBoard.ps1
+        participant B as Browser<br/>bluechip-board.html
+        participant P as Live service<br/>Bluechip-Board.ps1 -Live
     end
-    box transparent Internet
-        participant Y as Yahoo Finance
+    box transparent External
+        participant Y as Yahoo Finance<br/>spark API
     end
-    rect rgba(88,166,255,0.12)
-        U->>L: double-click the shortcut
-        L->>B: run the board, open the page
-        L-)P: start it, hidden (-Live)
+    rect rgba(128,128,128,0.07)
+        Note over U,Y: Start-up
+        U->>L: Launch the shortcut
+        L->>B: Run the board, open the page
+        L-)P: Start the service (hidden, 127.0.0.1:47821)
     end
-    rect rgba(63,185,80,0.12)
-        loop every minute, while the page is open
-            P->>+Y: one request for the 12 symbols
-            Y-->>-P: latest prices
-            B->>+P: GET /quotes (also: still open)
-            P-->>-B: prices, with the time and day of each
-            Note over B: added to the price series, then<br/>cards, alerts and portfolio redrawn
+    rect rgba(128,128,128,0.14)
+        Note over U,Y: Polling, while the page is open
+        loop every 60 s
+            P->>+Y: GET quotes, 12 symbols
+            Y-->>-P: 200 OK, latest quotes
+            B->>+P: GET /quotes (heartbeat)
+            P-->>-B: 200 OK, quotes with time and exchange day
+            Note over B: Update the series, redraw<br/>cards, alerts and portfolio
         end
     end
-    rect rgba(210,153,34,0.12)
-        U->>B: close the page
-        B-)P: POST /bye
-        Note over P: ends 20 s later if no page comes back,<br/>or after 5 minutes without any request
+    rect rgba(128,128,128,0.07)
+        Note over U,Y: Shutdown
+        U->>B: Close the page
+        B-)P: POST /bye (sendBeacon)
+        Note over P: Exit after a 20 s grace period,<br/>or after 5 min without requests
     end
 ```
 
@@ -84,14 +87,7 @@ Its limits and safeguards:
 
 ## The website
 
-```text
-┌─ HEADER: asset filter (All · Apple · NVIDIA · Alphabet · ETF & market · Europe · EM · Japan · Bitcoin) · US / Xetra open? ─┐
-├─ MARKET SNAPSHOT ───────────┬─ TABS ──────────────────────────────────────────────────────────────────────────────┤
-│ one card per asset + EUR/USD │ Overview · Portfolio · News · Prices · Fundamentals · Currency & Macroeconomics ·    │
-│ price, date, change, 3-month │ Calendar · ETFs · Bitcoin · Sources & method                                        │
-│ chart, 52-week range         │                                                                                     │
-└─ FOOTER: Updated <date>, <time> Lisbon time ─────────────────────────────────────────────────────────────────────┘
-```
+![The website: header with the asset filter and exchange status, the market snapshot cards on the left, the tabs and their content on the right, and the footer](docs/website-layout.drawio.svg)
 
 | Tab | What you find there |
 |---|---|
@@ -241,7 +237,7 @@ flowchart LR
 | `Bluechip-Board.ico` | The shortcut's icon. | yes |
 | `bluechip-board.config.example.json` | Template for `bluechip-board.config.json`. | yes |
 | `Tests\`, `.github\workflows\tests.yml` | Test suites and their fixtures; GitHub Actions. | yes |
-| `docs\architecture.drawio.svg` | The architecture diagram (draw.io). | yes |
+| `docs\architecture.drawio.svg`, `docs\website-layout.drawio.svg` | The architecture and the page layout (draw.io). | yes |
 | `bluechip-board.config.json` | Your SEC e-mail. | **no** (personal) |
 | `bluechip-board-backup.json` (+ `.previous.json`) | Your purchases, sales, targets, policy, notes and fees. | **no** (personal) |
 | `bluechip-board.html` | The website. It embeds your backup. | **no** (personal; rebuilt every run) |
@@ -364,7 +360,7 @@ flowchart LR
 - **PowerShell 7 is slow on .NET method calls** (about 10 µs each on 7.6). In loops over thousands of items use hashtables by index, arrays and operators.
 - **Windows PowerShell 5.1:** arrays out of a pipeline can become `{value, Count}` in JSON. Build pairs in a plain `foreach`.
 - **Dates as text:** always `.ToString('yyyy-MM-dd', $Script:Inv)`.
-- **Diagrams.** The flowcharts are Mermaid blocks in the Markdown (GitHub and VS Code draw them). The architecture is `docs/architecture.drawio.svg`, a picture that draw.io can edit. Keep them in step with the code.
+- **Diagrams.** The flowcharts are Mermaid blocks in the Markdown (GitHub and VS Code draw them). The architecture and the page layout are `docs/*.drawio.svg`, pictures that draw.io can edit. Keep them in step with the code.
 - **Never edit the outputs** (`bluechip-board.html`, the data file): change the template and run again.
 
 ### Code map
