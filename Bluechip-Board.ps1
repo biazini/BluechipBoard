@@ -64,8 +64,11 @@ try {
     if ($protocolo -ne 0 -and -not ($protocolo -band 3072)) { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]($protocolo -bor 3072) }
 } catch { }
 
-# Browser identity sent to news and price sites (some refuse non-browser clients). Update the Chrome version now and then.
-$Script:UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36'
+# Browser identity sent to news and price sites (some refuse non-browser clients). Update the Chrome version now and then:
+# $Script:UAChrome is the major version and $Script:UAData the day it was current (Chrome ships a new one every 4 weeks), so a
+# maintenance reminder appears when it is about 8 versions behind.
+$Script:UAChrome = 154; $Script:UAData = '2026-10-07'
+$Script:UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/$($Script:UAChrome).0.0.0 Safari/537.36"
 $Script:Inv = [Globalization.CultureInfo]::InvariantCulture
 $Script:Agora = [DateTimeOffset]::UtcNow
 $Script:Fontes = New-Object System.Collections.Generic.List[object]
@@ -637,6 +640,7 @@ function ConvertTo-IsoUtc($Valor) {
 # pessoais. Escrito no fim da execução, depois do vistos.json (uma execução que falha a meio não o altera).
 # ----------------------------------------------------------------------------
 $HistoricoDias = 400
+$HistoricoMax = 15000   # notícias no máximo (hoje entram ~20 por dia: ~8 000 em 400 dias)
 function ConvertTo-NoticiaHistorico($N) {
     if (-not $N) { return $null }
     $d = ConvertTo-IsoUtc $N.data; $t = "$($N.titulo)"
@@ -679,7 +683,15 @@ function Merge-HistoricoNoticias($Historico, $Noticias, [DateTimeOffset]$Agora, 
     }
     $inicio = if ($Historico.inicio) { $Historico.inicio } else { ConvertTo-IsoUtc $Agora }
     if ((ConvertTo-Data $inicio) -lt $corte) { $inicio = ConvertTo-IsoUtc $corte }
-    [pscustomobject]@{ inicio = $inicio; itens = @($porChave.Values | Sort-Object data); estado = $Historico.estado; aviso = $Historico.aviso }
+    $itens = @($porChave.Values | Sort-Object data, chave)
+    # Limite de segurança ($HistoricoMax notícias, cerca de 2 anos ao ritmo de hoje): o ficheiro vai para o site e para cada
+    # cópia do Archive, e o Windows PowerShell 5.1 lê-o inteiro. Acima dele ficam as mais recentes, e o início passa a ser a
+    # data da mais antiga que ficou (o site nunca diz que o histórico começa antes do que tem).
+    if ($itens.Count -gt $HistoricoMax) {
+        $itens = @($itens | Select-Object -Last $HistoricoMax)
+        $inicio = $itens[0].data
+    }
+    [pscustomobject]@{ inicio = $inicio; itens = $itens; estado = $Historico.estado; aviso = $Historico.aviso }
 }
 
 # ----------------------------------------------------------------------------
@@ -958,6 +970,15 @@ function Get-SerieMacro([hashtable]$S) {
         Add-Fonte $nome 'macro' $u 'error' 0 $sw.ElapsedMilliseconds $_.Exception.Message
         return [pscustomobject]@{ id = $S.Id; nome = $S.Nome; estado = 'error'; fonte = ''; obtidoEm = $Script:Agora.ToString('o'); freq = $S.Chave.Substring(0, 1); pontos = @(); erro = $_.Exception.Message }
     }
+}
+# Lembrete de manutenção: a versão do Chrome no User-Agent ($Script:UAChrome, atual em $Script:UAData) com cerca de 8 versões
+# de atraso (uma a cada 4 semanas). Um navegador muito antigo é mais facilmente recusado pelos sites.
+function Get-LembreteUA([int]$Versao, [string]$Desde, [DateTimeOffset]$Agora) {
+    $d = [datetime]::MinValue
+    if (-not [datetime]::TryParseExact($Desde, 'yyyy-MM-dd', $Script:Inv, [Globalization.DateTimeStyles]::None, [ref]$d)) { return "The date of the browser identity (`$Script:UAData = '$Desde') is not yyyy-MM-dd." }
+    $atraso = [int][math]::Floor(($Agora.UtcDateTime - $d).TotalDays / 28)
+    if ($atraso -lt 8) { return $null }
+    return "The browser identity sent to the sites says Chrome $Versao, about $atraso versions behind the current Chrome (a new one every 4 weeks): set `$Script:UAChrome to the current version and `$Script:UAData to today."
 }
 # Lembrete de manutenção: sem uma decisão da Fed, ou do BCE, a mais de 60 dias no calendário manual
 function Get-LembreteReunioes($Cal, [DateTimeOffset]$Agora) {
@@ -4435,6 +4456,8 @@ foreach ($b in $Bolsas) {
 }
 $lembReun = Get-LembreteReunioes $Calendario $Script:Agora
 if ($lembReun) { $manutencao.Add($lembReun) }
+$lembUA = Get-LembreteUA $Script:UAChrome $Script:UAData $Script:Agora
+if ($lembUA) { $manutencao.Add($lembUA) }
 $semAlias = @(Get-PosicoesSemAlias $pesosEtfs)
 if ($semAlias.Count) { $manutencao.Add("Top 10 holdings without a news alias (`$AliasesPosicoes): $($semAlias -join '; '). Add an alias with word boundaries and exclusions, so their news is linked to the fund.") }
 foreach ($m in $manutencao) { Write-Host "  ! $m" -ForegroundColor DarkYellow }
@@ -4503,6 +4526,10 @@ Write-Atomico $vistosPath ($vistosNovos | ConvertTo-Json -Compress)
 if ($histNoticias.estado -eq 'corrupted' -and (Test-Path -LiteralPath $histPath)) { Copy-Item -LiteralPath $histPath -Destination "$histPath.bad" -Force }
 Write-Atomico $histPath ([ordered]@{ versao = 1; inicio = $histNoticias.inicio; dias = $HistoricoDias; noticias = @($histNoticias.itens) } | ConvertTo-Json -Depth 5 -Compress)
 Get-ChildItem -Path $arquivo -Filter 'bluechip-board-2*.html' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 30 | Remove-Item -Force -ErrorAction SilentlyContinue
+# e no máximo ~300 MB no total (cada cópia cresce com o histórico de notícias): saem as mais antigas, ficando sempre 5
+$copias = @(Get-ChildItem -Path $arquivo -Filter 'bluechip-board-2*.html' | Sort-Object LastWriteTime -Descending)
+$total = 0; $nCopia = 0
+foreach ($c in $copias) { $total += $c.Length; $nCopia++; if ($nCopia -gt 5 -and $total -gt 300MB) { Remove-Item -LiteralPath $c.FullName -Force -ErrorAction SilentlyContinue } }
 
 $ok = @($Script:Fontes | Where-Object { $_.estado -like 'ok*' }).Count
 $conta = { param($n) @($noticias | Where-Object { $_.nivel -eq $n }).Count }

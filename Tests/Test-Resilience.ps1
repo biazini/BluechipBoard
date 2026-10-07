@@ -33,6 +33,8 @@ $t = $t.Replace("foreach (`$r in @(Get-DatasResultados)) {", "if (`$env:BB_TEST_
 # nome de tarefa só deste teste: mesmo que o registo verdadeiro chegasse a correr, nunca tocaria na tarefa real
 $tarefaTeste = 'BluechipBoard-Test-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
 $t = $t.Replace("-TaskName 'BluechipBoard'", "-TaskName '$tarefaTeste'")
+# limite de tamanho do Archive: com BB_TEST_ARQ_MAX (bytes) o teste usa um limite pequeno em vez de 300 MB
+$t = $t.Replace('$total -gt 300MB', '$total -gt $(if ($env:BB_TEST_ARQ_MAX) { [int64]$env:BB_TEST_ARQ_MAX } else { 300MB })')
 $copia = Join-Path $base 'Bluechip-Board.ps1'
 [IO.File]::WriteAllText($copia, $t, (New-Object Text.UTF8Encoding($true)))
 
@@ -172,6 +174,14 @@ try {
     $h6 = [IO.File]::ReadAllText("$p3c\bluechip-board.html"); $ar6 = [IO.File]::ReadAllText((Get-ChildItem "$p3c\Archive" | Select-Object -First 1).FullName); $d6 = [IO.File]::ReadAllText("$p3c\bluechip-board-data.json")
     Check 'backup v5: fees embedded in the main site only (not in Archive or the data file)' ($h6.Contains('"fees":{"n1":{"v":1234.56') -and -not ($ar6 + $d6).Contains('1234.56') -and -not $d6.Contains('"fees"'))
     Check 'backup v5: policy and notes embedded in the main site only (not in Archive or the data file)' ($h6.Contains('PRIVATE-HORIZON-TEXT') -and $h6.Contains('PRIVATE-NOTE-TEXT') -and -not ($ar6 + $d6).Contains('PRIVATE-') -and -not $d6.Contains('"policy"') -and -not $d6.Contains('"notes"')) $o
+
+    Write-Host 'Archive: at most 30 copies and about 300 MB in total'
+    $p12 = Join-Path $base 'archive'; New-Item -ItemType Directory "$p12\Archive" -Force | Out-Null
+    for ($k = 1; $k -le 8; $k++) { $fa = "$p12\Archive\bluechip-board-2026-09-0$($k)_0800.html"; [IO.File]::WriteAllText($fa, ('x' * 2048)); (Get-Item $fa).LastWriteTime = (Get-Date).AddDays(-20 + $k) }
+    $dl12 = Join-Path $base 'Downloads-arq'; New-Item -ItemType Directory $dl12 | Out-Null
+    $o = Invoke-Copia $p12 @{ BB_TEST_BLOCK = '.'; BB_TEST_DOWNLOADS = $dl12; BB_TEST_ARQ_MAX = '1' }
+    $restam = @(Get-ChildItem "$p12\Archive" -Filter 'bluechip-board-2*.html' | Sort-Object LastWriteTime -Descending)
+    Check 'Archive over its size limit: the oldest copies go, the 5 most recent stay (the new one included)' ($restam.Count -eq 5 -and $restam[0].Length -gt 2048 -and -not (Test-Path "$p12\Archive\bluechip-board-2026-09-01_0800.html") -and (Test-Path "$p12\Archive\bluechip-board-2026-09-08_0800.html")) (@($restam | ForEach-Object { $_.Name }) -join ', ')
 
     Write-Host 'A run that fails halfway'
     $antesHtml = [IO.File]::ReadAllText("$p3\bluechip-board.html"); $antesV = '{"abc":"2026-10-01T00:00:00.0000000+00:00"}'

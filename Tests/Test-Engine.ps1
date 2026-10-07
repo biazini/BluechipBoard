@@ -785,6 +785,38 @@ $copia = { param($x) @(foreach ($m in $x) { $c = $m.PSObject.Copy(); $c.outras =
 $a1 = & $sig @(Join-NoticiasDuplicadas (& $copia $base)); [array]::Reverse($base); $a2 = & $sig @(Join-NoticiasDuplicadas (& $copia $base))
 Check 'duplicate grouping does not depend on the order of the input (ties in score and date broken by the title key)' ($a1 -eq $a2 -and $a1 -match '<t\d+') "$a1 | $a2"
 
+# --- manutenção: identidade do navegador (Chrome) e limite do histórico de notícias ---
+Check 'browser identity: a reminder only when the Chrome version is about 8 releases old (4 weeks each), or its date is malformed' ($null -eq (Get-LembreteUA 154 '2026-10-07' ([DateTimeOffset]::Parse('2027-04-01T00:00:00Z', $Script:Inv))) -and (Get-LembreteUA 154 '2026-10-07' ([DateTimeOffset]::Parse('2027-06-01T00:00:00Z', $Script:Inv))) -match 'Chrome 154, about 8 versions behind' -and (Get-LembreteUA 154 '7 Oct' $Script:Agora) -match 'not yyyy-MM-dd')
+$hm = $HistoricoMax; $HistoricoMax = 3
+$hx = Merge-HistoricoNoticias ([pscustomobject]@{ inicio = '2026-09-01T00:00:00Z'; itens = @(); estado = 'ok'; aviso = '' }) @(
+    [pscustomobject]@{ titulo = 'A'; chave = 'a'; data = '2026-10-01T10:00:00Z'; nivel = 'red'; score = 8; empresas = @('AAPL'); temas = @() },
+    [pscustomobject]@{ titulo = 'B'; chave = 'b'; data = '2026-10-02T10:00:00Z'; nivel = 'orange'; score = 5; empresas = @('AAPL'); temas = @() },
+    [pscustomobject]@{ titulo = 'C'; chave = 'c'; data = '2026-10-03T10:00:00Z'; nivel = 'orange'; score = 5; empresas = @('AAPL'); temas = @() },
+    [pscustomobject]@{ titulo = 'D'; chave = 'd'; data = '2026-10-04T06:00:00Z'; nivel = 'red'; score = 9; empresas = @('NVDA'); temas = @() }) $Script:Agora
+$HistoricoMax = $hm
+Check 'news history over its safety limit: the most recent stories are kept and its start moves to the oldest one kept' (@($hx.itens).Count -eq 3 -and (@($hx.itens | ForEach-Object { $_.chave }) -join ',') -eq 'b,c,d' -and $hx.inicio -eq '2026-10-02T10:00:00Z') ($hx | ConvertTo-Json -Depth 4 -Compress)
+Check 'static: browser identity built from $Script:UAChrome (a current Chrome) with its date, and the reminder wired in' ($texto -match '\$Script:UAChrome = \d{3}; \$Script:UAData = ''\d{4}-\d{2}-\d{2}''' -and $texto -match 'Get-LembreteUA \$Script:UAChrome \$Script:UAData \$Script:Agora')
+
+# --- L9: a lista de ativos repetida em vários sítios tem de bater certo (rede de segurança ao juntar um ativo) ---
+$modelo = $texto.Substring($texto.IndexOf('function Get-Plantilla {'), $texto.IndexOf('# 4. EXECU') - $texto.IndexOf('function Get-Plantilla {'))
+$idsEtf = @($ETFs | ForEach-Object { $_.Id }); $idsAcoes = @($Ativos | Where-Object { $_.Id -ne 'BTC' -and $_.Id -notin $idsEtf } | ForEach-Object { $_.Id })
+$faltas = New-Object System.Collections.Generic.List[string]
+foreach ($a in $Ativos) {
+    $id = $a.Id
+    if ($modelo -notmatch "\b${id}:\{n:'") { $faltas.Add("${id}: no CO entry (colour and name) in the template") }
+    if ($id -ne 'BTC' -and $modelo -notmatch "\b${id}:\{codigo:'G\d\d',pais:'\d{3}'") { $faltas.Add("${id}: no ANEXO_J line (tax export)") }
+    if (-not $EmpresasRe.Contains($id)) { $faltas.Add("${id}: no keywords in `$EmpresasRe (news)") }
+    if (-not @($Feeds | Where-Object { $_.Dica -eq $id -or $_.Exigir -eq $id }).Count) { $faltas.Add("${id}: no news feed of its own") }
+}
+foreach ($id in $idsAcoes) {
+    if ($modelo -notmatch "const BOLSA_DE=\{[^}]*\b${id}:'US'") { $faltas.Add("${id}: not in BOLSA_DE (exchange hours, freshness)") }
+    if ($modelo -notmatch "const PF=\[[^\n]*\['${id}',") { $faltas.Add("${id}: not in PF (portfolio)") }
+    if ($id -notin @($SecEmpresas | ForEach-Object { $_.Id })) { $faltas.Add("${id}: not in `$SecEmpresas (SEC filings, earnings, fundamentals)") }
+    if ($modelo -notmatch "const FUND_IDS=\[[^\]]*'${id}'") { $faltas.Add("${id}: not in FUND_IDS (Fundamentals tab)") }
+}
+foreach ($e in $ETFs) { if (-not ($Ativos | Where-Object { $_.Id -eq $e.Id })) { $faltas.Add("$($e.Id): in `$ETFs but not in `$Ativos") }; if ($e.Id -ne 'SXR8' -and $modelo -notmatch "--$($e.Id.ToLowerInvariant()):#") { $faltas.Add("$($e.Id): no colour token --$($e.Id.ToLowerInvariant())") } }
+Check 'L9: every asset is complete in all the places a new one must be added (CO, ANEXO_J, keywords, feed, BOLSA_DE, PF, SEC, Fundamentals, ETF colours)' ($faltas.Count -eq 0) ($faltas -join '; ')
+
 # --- iShares: mudança de formato do ficheiro dita na fonte ---
 ${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) return $Script:Ficheiros['251861'] }
 $Script:Ficheiros['251861'] = (iShares 'IE00B4K48X80' $linhasEU).Replace('>Market Currency<', '>Currency X<')
