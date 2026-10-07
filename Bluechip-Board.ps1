@@ -2706,7 +2706,8 @@ const dias=n=>n+(n===1?' day':' days');
 const ago=t=>{if(!t)return'no date';const m=(GEN-t)/6e4;if(m<60)return`${Math.max(1,Math.round(m))} min ago`;const h=m/60;if(h<24)return`${Math.round(h)} h ago`;return`${dias(Math.round(h/24))} ago`;};
 /* o PowerShell 5.1 às vezes serializa um par [data, valor] como {value:[data, valor], Count:2}: aceita as duas formas */
 const pair=p=>Array.isArray(p)?p:(p&&Array.isArray(p.value)?p.value:[]);
-const toPts=a=>arr(a).map(pair).map(p=>[Date.parse(p[0]+'T00:00:00Z'),+p[1]]).filter(p=>isFinite(p[0])&&isFinite(p[1]));
+/* um valor em falta (null, '') fica de fora: +null daria 0, um preço de zero que pareceria uma queda de 100 % */
+const toPts=a=>arr(a).map(pair).filter(p=>p[1]!=null&&p[1]!==''&&typeof p[1]!=='boolean').map(p=>[Date.parse(p[0]+'T00:00:00Z'),+p[1]]).filter(p=>isFinite(p[0])&&isFinite(p[1]));
 const NEWS=arr(D.noticias).map(n=>{const o=arr(n.outras);return Object.assign({},n,{empresas:arr(n.empresas),temas:arr(n.temas),viaPosicao:arr(n.viaPosicao).map(String),outras:o,t:n.data?Date.parse(n.data):null,busca:[n.titulo,n.fonte].concat(o.map(x=>x.titulo+' '+x.fonte)).join(' ').toLowerCase()});});
 const ATIVOS=arr(D.ativos).map(a=>Object.assign({},a,{pts:toPts(a.pontos)}));
 const MERC=arr(D.mercado).map(a=>Object.assign({},a,{pts:toPts(a.pontos)}));
@@ -2830,7 +2831,7 @@ function renderHero(){const fx=FX.length?FX[FX.length-1][1]:null;
  $('#tickers').innerHTML=ATIVOS.map(a=>{const s=stats(a.pts),m=(a.moeda||'').toUpperCase(),sym=m==='EUR'?'€':'$',c=heroColor(a),nm=ehEtf(a.id)?'ETF '+etfIdx(a.id):a.nome,fr=frescura(a.id,a.pts),ao=asOf(a,fr);
   const head=`<span class="tk-badge">${ic((CO[a.id]||{}).i||'chart')}</span><div class="tk-id"><span class="tk-name">${ehEtf(a.id)?'<span class="lg">ETF </span>'+esc(etfIdx(a.id)):esc(nm)}</span><span class="tk-sym">${esc(a.simbolo)}${m?'<span class="lg"> · '+esc(m)+'</span>':''}${ao?` · <span class="asof${fr&&(fr.velho||antigo(a))?' old':''}" title="${fr&&fr.velho?`${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind: the source may be lagging`:'Date of the latest price'}">${esc(ao)}</span>`:''}</span></div>`;
   if(!s)return`<article class="tk${HERO_LUGAR[a.id]||''}" data-tk="${a.id}" style="--c:${c}">${head}<p class="tk-empty">No prices. See the Sources section.</p></article>`;
-  const btc=a.id==='BTC',bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&isFinite(bm.var24)?+bm.var24:null,chg=v24!=null?v24:s.d1,chgT=v24!=null?'over the last 24 hours':btc?'since 00:00 UTC':a.parcial?'so far today (session open)':'in the last session';
+  const btc=a.id==='BTC',bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&bm.var24!=null&&isFinite(bm.var24)?+bm.var24:null,chg=v24!=null?v24:s.d1,chgT=v24!=null?'over the last 24 hours':btc?'since 00:00 UTC':a.parcial?'so far today (session open)':'in the last session';
   const fxe=lastFxPara(a),eur=btc?`${fx?`≈ $${nf(s.last*fx,0)} · `:''}market open 24/7`:m==='USD'?(fxe?`≈ €${nf(s.last/fxe,2)} at the rate of that day`:'No EUR/USD rate for that day'):'Priced in euros (Xetra)';
   const range=s.hi!=null?(()=>{const rp=Math.max(0,Math.min(100,(s.last-s.lo)/((s.hi-s.lo)||1)*100));return`<div class="range" data-tip="52-week range: ${sym}${nf(s.lo,2)} – ${sym}${nf(s.hi,2)}"><div class="range-bar"><span class="range-fill" style="width:${rp}%"></span><span class="range-mk" style="left:${rp}%"></span></div><div class="range-lbl"><span>${sym}${nf(s.lo,2)}</span><span>52-week low and high</span><span>${sym}${nf(s.hi,2)}</span></div></div>`;})():'';
   return`<article class="tk${HERO_LUGAR[a.id]||''}" data-tk="${a.id}" style="--c:${c}" aria-label="${esc(nm)}">${head}<span class="chg ${cls(chg)}" title="Change ${chgT}">${ic(chg!=null&&chg<0?'trend-down':'trend-up')}${pct(chg)}<span class="sr"> ${chgT}</span></span>`+
@@ -2860,7 +2861,7 @@ function alerts(){const out=[],add=(l,co,txt,tab)=>out.push({l,co,txt,tab});
   if(antigo(a))add('orange',a.id,`${nm}: prices could not be downloaded in this run, so the previous run's data is shown (latest price from ${fdS(fr.iso)}). The figures for ${a.nome} are not current.`,'sources');
   else if(fr&&fr.velho)add('orange',a.id,`${nm}: the latest price is from ${fdS(fr.iso)}, ${fr.falta} ${fr.un}${fr.falta>1?'s':''} behind. The source may be lagging, so the figures for ${a.nome} are not current.`,'sources');
   /* a Bitcoin é várias vezes mais volátil do que as ações: os limiares são mais largos para não alertar todos os dias */
-  const btc=a.id==='BTC',L=btc?{d:6,o:-30,y:-15}:{d:4,o:-20,y:-10},bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&isFinite(bm.var24)?+bm.var24:null;
+  const btc=a.id==='BTC',L=btc?{d:6,o:-30,y:-15}:{d:4,o:-20,y:-10},bm=btc&&D.bitcoin&&D.bitcoin.mercado,v24=bm&&bm.var24!=null&&isFinite(bm.var24)?+bm.var24:null;
   /* dados atrasados ou da execução anterior: o movimento não é de hoje, e a mensagem diz de quando é (a variação de 24 h da
      CoinGecko é sempre atual) */
   const velho=antigo(a)||!!(fr&&fr.velho),mv=btc&&v24!=null?v24:s.d1,sess=btc&&v24!=null?'over the last 24 hours':velho&&fr?`on ${fdS(fr.iso)} (the latest price available, not today)`:btc?'since 00:00 UTC':(a.parcial?'so far today':'in the last session');
@@ -2871,7 +2872,7 @@ function alerts(){const out=[],add=(l,co,txt,tab)=>out.push({l,co,txt,tab});
    if(s.dist<=L.y)out[out.length-1].ctx={id:a.id,d:-s.dist};  /* contexto (regra do utilizador e histórico), desenhado em renderAlerts */
    else if(s.dist>-1.5)add('white',a.id,`${nm} is close to its 52-week high.`,btc?'bitcoin':'prices');}
   if(s.ma200!=null&&s.last<s.ma200)add('yellow',a.id,`${nm} is below its ${btc?'200-day':'200-session'} average.`,btc?'bitcoin':'prices');});
- const fg=D.bitcoin&&D.bitcoin.sentimento;if(fg&&isFinite(fg.valor)){const k=fgClasse(+fg.valor);if(k==='xf')add('yellow','BTC',`Bitcoin sentiment is at extreme fear (${fg.valor}/100): this tends to coincide with sharp drops and high volatility.`,'bitcoin');else if(k==='xg')add('yellow','BTC',`Bitcoin sentiment is at extreme greed (${fg.valor}/100): euphoria tends to come with abrupt corrections.`,'bitcoin');}
+ const fg=D.bitcoin&&D.bitcoin.sentimento;if(fg&&fg.valor!=null&&isFinite(fg.valor)){const k=fgClasse(+fg.valor);if(k==='xf')add('yellow','BTC',`Bitcoin sentiment is at extreme fear (${fg.valor}/100): this tends to coincide with sharp drops and high volatility.`,'bitcoin');else if(k==='xg')add('yellow','BTC',`Bitcoin sentiment is at extreme greed (${fg.valor}/100): euphoria tends to come with abrupt corrections.`,'bitcoin');}
  /* câmbio: sem taxa não há valores em euros das ações americanas; com uma alternativa, diz qual */
  if(!FX.length)add('red','MKT','No EUR/USD rate in this run: the euro values of the US stocks, and of your portfolio, cannot be calculated and are left blank.','sources');
  else if(!/^Yahoo/.test(FXSRC))add('orange','MKT',`The EUR/USD series from Yahoo failed: conversions use the ${FXSRC}${FXSRC.startsWith('ECB')?', so euro figures older than 90 days (1 year, year to date, 52-week high) are not shown':''}.`,'sources');
@@ -3137,7 +3138,7 @@ function corr(a,b){const mb=new Map(b.map(p=>[p[0],p[1]])),c=a.filter(p=>mb.has(
 const grande=v=>v==null||!isFinite(v)?'—':v>=1e12?nf(v/1e12,2)+' trillion':v>=1e9?nf(v/1e9,1)+' billion':nf(v/1e6,0)+' million';
 function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.mercado,fg=B.sentimento,rd=B.rede,p=a?a.pts:[],s=stats(p),fx=FX.length?FX[FX.length-1][1]:null;
  $('#btcLead').textContent=`Bitcoin trades 24 hours a day, 7 days a week, and is tracked here in euros (BTC/EUR).${s?` Last price: €${nf(s.last,0)}; ${pct(s.m1)} over a month, ${pct(s.y1)} over a year and ${pct(s.dist)} from its 52-week high.`:' No prices in this run: see the Sources section.'}`;
- const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,v24=m&&isFinite(m.var24)?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
+ const k=(i,lab,v,sub,c)=>`<div class="kpi"><div class="k">${ic(i)}${lab}</div><div class="v ${c||''}">${v}</div><div class="s">${sub}</div></div>`,v24=m&&m.var24!=null&&isFinite(m.var24)?+m.var24:(s?s.d1:null),w1=s?s.w1:null,g=MERC.find(x=>x.id==='GSPC'),gs=g?stats(g.pts):null;
  $('#btcKpis').innerHTML=k('bitcoin','Price',s?'€'+nf(s.last,0):(m?'€'+nf(m.eur,0):'—'),m&&m.usd?`≈ $${nf(m.usd,0)}`:(s&&fx?`≈ $${nf(s.last*fx,0)}`:'in euros'))+
   k('clock','24 hours',pct(v24),m?'change over the last 24 h':'since 00:00 UTC',cls(v24))+
   k('calendar','7 days',pct(w1),s?`30 days: ${pct(s.m1)}`:'',cls(w1))+
@@ -3145,7 +3146,7 @@ function renderBtc(){const a=ATIVOS.find(x=>x.id==='BTC'),B=D.bitcoin||{},m=B.me
  const sl=slice(p),t0=sl.length?sl[0][0]:0,cut=x=>x.filter(q=>q[0]>=t0),ch=sl.length>1?(sl[sl.length-1][1]/sl[0][1]-1)*100:null;
  $('#k-btc').innerHTML=s?`<span class="mk-v">€${nf(s.last,0)}</span><span class="mk-c ${cls(ch)}">${pct(ch)} over the period</span>`:'';
  lineMulti($('#ch-btc'),[{n:'Bitcoin',c:'var(--btc)',pts:sl},{n:'50-day average',c:'var(--muted)',pts:cut(mm(p,50))},{n:'200-day average',c:'var(--accent)',pts:cut(mm(p,200))}],{dec:0,tdec:0,unit:' €',h:360,label:'Bitcoin price in euros'});
- if(fg&&isFinite(fg.valor)){const sp=toPts(fg.serie),v=+fg.valor,col={xf:'var(--red)',f:'var(--orange)',n:'var(--yellow)',g:'var(--pos)',xg:'var(--pos)'}[fgClasse(v)],antes=d=>{if(!sp.length)return'—';const t=sp[sp.length-1][0]-d*DAY,q=sp.filter(x=>x[0]<=t);return q.length?q[q.length-1][1]:'—';};
+ if(fg&&fg.valor!=null&&isFinite(fg.valor)){const sp=toPts(fg.serie),v=+fg.valor,col={xf:'var(--red)',f:'var(--orange)',n:'var(--yellow)',g:'var(--pos)',xg:'var(--pos)'}[fgClasse(v)],antes=d=>{if(!sp.length)return'—';const t=sp[sp.length-1][0]-d*DAY,q=sp.filter(x=>x[0]<=t);return q.length?q[q.length-1][1]:'—';};
   $('#btcSent').innerHTML=`<div class="big-v"><b>${v}</b><span style="color:${col}">${esc(fg.classe)}</span></div><div class="fng-bar" role="img" aria-label="Index at ${v} out of 100"><i style="left:${Math.max(0,Math.min(100,v))}%"></i></div><div class="fng-lbl"><span>Extreme fear</span><span>Neutral</span><span>Extreme greed</span></div><ul class="kv"><li>A week ago<b>${antes(7)}</b></li><li>A month ago<b>${antes(30)}</b></li></ul>`;
   lineMulti($('#ch-fng'),[{n:'Fear & Greed',c:'var(--btc)',pts:slice(sp)}],{dec:0,h:170,ref:50,refLabel:'neutral',label:'Fear & Greed Index over the period'});}
  else{empty($('#btcSent'),'No sentiment data in this run.');$('#ch-fng').innerHTML='';}

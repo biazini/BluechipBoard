@@ -53,7 +53,7 @@ $pagina = Join-Path $pasta 'site-test.html'
 $lista = @('newuser', 'v1backup', 'reopen1', 'reopen2', 'legacy', 'merge', 'tomb', 'wrongfolder', 'restore', 'migrate', 'split', 'fxlong', 'fxnone', 'fxecb', 'stale', 'prev', 'fifo', 'cal', 'stats', 'xss', 'corrupt',
     'div', 'divnone', 'divfail', 'divbad', 'divstale', 'divfx', 'div8a', 'div8afx', 'div8anone', 'newsrel', 'newsrelempty', 'evts', 'evtsempty', 'fund', 'fundempty', 'macro', 'macroempty', 'tax', 'taxsplit', 'taxcrypto', 'taxold', 'taxbad', 'taxfx', 'taxfx0', 'taxBaseline', 'ret', 'retsales', 'retshort', 'retmissing', 'retempty', 'tgtsplit', 'tgtsplit2', 'tgtnoprice', 'tgtsum', 'tgtmerge', 'tgtold', 'polctx', 'polnone', 'polzero', 'polform', 'polnotes', 'polmerge', 'polold', 'stress', 'stressnone', 'strat', 'roll', 'rollshort', 'rollbtc', 'expo', 'expostocks', 'expoold', 'conc', 'sellsim', 'sellbtc', 'fees', 'feesold',
     'etfui', 'etfpf', 'etfbackup', 'etfmissing', 'etfstale', 'etfhold', 'etfbad',
-    'bkfolder', 'bkperm', 'bkpermno', 'bkstrict', 'v1dup', 'taxround', 'stalemove', 'earnpartial')
+    'bkfolder', 'bkperm', 'bkpermno', 'bkstrict', 'v1dup', 'taxround', 'stalemove', 'earnpartial', 'btcnull')
 $Only = @($Only | ForEach-Object { "$_" -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })   # "-Only a,b" chega como um só texto com -File
 if ($Only.Count) { $lista = @($lista | Where-Object { $_ -in $Only }) }
 $falhas = 0; $total = 0

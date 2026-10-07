@@ -1014,6 +1014,13 @@ const SC={
    d.resultadosSec={AAPL:{id:'AAPL',estado:'ok',fonte:'SEC EDGAR',obtidoEm:d.geradoEm,resultados:[{acc:'x1',entrega:L,aceite:L+'T12:00:00Z',horaNY:L+' 08:00',quando:'before',sessao:L,nota:''},{acc:'x2',entrega:E,aceite:E+'T12:00:00Z',horaNY:E+' 08:00',quando:'before',sessao:E,nota:''}],ultimoRelatorio:null,erro:'',nota:''}};},test(api){
   const E=api.reacoes('AAPL');
   ok('earnings reaction on a session still open (intraday price): not counted as a reaction; the earlier one is',E.ok&&E.C.length===1&&E.C[0].x.acc==='x2'&&E.sem===1,JSON.stringify({n:E.C.length,sem:E.sem}));}},
+ /* um campo em falta (null) não é 0: a variação de 24 h da CoinGecko e um ponto de preço sem valor */
+ btcnull:{prep(d){d.bitcoin=d.bitcoin||{};d.bitcoin.mercado=Object.assign({},d.bitcoin.mercado||{eur:60000},{var24:null});
+   const a=d.ativos.find(x=>x.id==='AAPL'),P=a.pontos.map(pair);P[P.length-3]=[P[P.length-3][0],null];a.pontos=P;},test(api){
+  const c=document.querySelector('.tk[data-tk="BTC"] .chg'),s=api.stats(api.ATIVOS.find(x=>x.id==='BTC').pts);
+  ok('Bitcoin without the CoinGecko 24 h change: the card shows the change since 00:00 UTC, not +0.00%',c&&/since 00:00 UTC/.test(c.getAttribute('title')||'')&&(s.d1===0||!/^\+?0\.00%/.test(c.textContent.trim())),c&&(c.getAttribute('title')+' '+c.textContent));
+  const aa=api.ATIVOS.find(x=>x.id==='AAPL');
+  ok('a price point without a value is left out (never read as a price of 0)',aa.pts.every(p=>p[1]>0)&&!api.alerts().some(x=>x.co==='AAPL'&&/fell 100/.test(x.txt)),JSON.stringify(aa.pts.filter(p=>!(p[1]>0))));}},
  corrupt:{raw:'{"geradoEm": broken',after(){ok('unreadable data: the page says so instead of going blank',/could not be read/.test(txt('#main .callout')),txt('#main .callout'));}}
 };
 const sc=SC[S];
