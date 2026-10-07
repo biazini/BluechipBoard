@@ -294,7 +294,7 @@ Use `powershell` (and leave out `-Shell pwsh`) for Windows PowerShell 5.1. Run a
 
 ### Working with git
 
-The GitHub repository `biazini/BluechipBoard` (private) is the source of truth. Your data and the outputs never go into git (`.gitignore`).
+The GitHub repository `biazini/BluechipBoard` is the source of truth. It is **public**: anyone can view and download it, only the owner can change it (issues, wiki and discussions are off). Your data and the outputs never go into git (`.gitignore`), so nothing personal is published.
 
 ```mermaid
 flowchart LR

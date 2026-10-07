@@ -5,6 +5,7 @@ What is still to **decide**, **improve** or **watch**. Everything already done (
 **State on 7 Oct 2026:**
 - Tests: engine 278, site 469, resilience 76, all passing on Windows PowerShell 5.1 and PowerShell 7, locally and in GitHub Actions.
 - A real run takes about one minute, with 79/79 sources answering.
+- The repository is public since 7 Oct 2026: view and download only; issues, wiki, projects and discussions are off; workflow runs from people outside the project need approval. Nothing personal is in it or in its history (checked before publishing).
 
 ---
 
@@ -23,7 +24,7 @@ Nothing is broken here: each item needs a choice from you before anything change
 | D7 | **Top-holding news aliases** apply only to feeds without a fixed asset (`Dica`). | Let them override it: more precise, but some existing classifications change (and one engine test must be updated on purpose). |
 | D8 | **Alphabet gross margin** is Unavailable: Alphabet reports no gross profit. | Show revenue − `CostOfRevenue`, marked as derived. |
 | D9 | **Country exposure of SXR8 and EUNN** uses the index country (iShares gives no breakdown), flagged as approximate. | Keep, or find another source. |
-| D10 | **Protecting `main`** (changes only through pull requests, auto-merge after the tests). Not available on a free private repository. | Upgrade to GitHub Pro, or keep merging by hand after the CI passes. |
+| D10 | **Protecting `main`** (changes only through pull requests, merge only after the tests pass, auto-merge). Free since the repository became public (7 Oct 2026). | Turn it on in the repository settings, or keep merging by hand. |
 
 ---
 
@@ -38,7 +39,6 @@ Nothing is broken here: each item needs a choice from you before anything change
 | I5 | **Log scale** only on the ETF long-term chart; the stocks have no long-term chart. | ETFs tab |
 | I6 | **Stress test** applies the S&P 500's peak and trough dates to every asset, not each asset's own. | `stress()` |
 | I7 | **Test sample data** (`Tests\fixtures\bluechip-board-data.sample.json`, from 6 Oct 2026) ages. Checks that compare with today's date could start failing in CI before they do here. Refresh it from a recent `bluechip-board-data.json`, which holds public data only: check it has no `"backup"` key and no e-mail. | `Tests\fixtures\` |
-| I8 | **CI time:** a run takes about 15 minutes, and Windows minutes count double on private repositories. If they run short, run only the engine suite on pushes. | `.github\workflows\tests.yml` |
 
 ---
 
