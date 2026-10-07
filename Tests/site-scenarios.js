@@ -13,7 +13,7 @@ const arr=x=>Array.isArray(x)?x:(x==null?[]:[x]);
 const seed=o=>{localStorage.clear();Object.keys(o).forEach(k=>localStorage.setItem('bb.'+k,JSON.stringify(o[k])));};
 const get=k=>{try{return JSON.parse(localStorage.getItem('bb.'+k));}catch(e){return undefined;}};
 const $=s=>document.querySelector(s),txt=s=>($(s)||{}).textContent||'';
-const V1={app:'Bluechip Board',version:1,exported:'2026-10-03T15:32:10.177Z',portfolio:{SXR8:{q:0,c:0}},lots:[],etfLots:[{id:'musjvneia0ov',d:'2026-10-01',q:1,p:732.58}]};
+const V1={app:'Bluechip Board',version:1,exported:'2026-10-03T15:32:10.177Z',portfolio:{SXR8:{q:0,c:0}},lots:[],etfLots:[{id:'v1sample0001',d:'2026-10-01',q:1,p:700}]};
 const histPrice=(d,id,iso)=>{const p=(d.historico[id]||[]).map(pair).find(x=>x[0]===iso);return p?+p[1]:null;};
 const lastIso=(d,id)=>{const h=(d.historico[id]||[]).map(pair);return h.length?h[h.length-1][0]:null;};
 let G={};
@@ -109,7 +109,7 @@ const SC={
 
  v1backup:{prep(d){d.backup=V1;},test(api){
   const b=get('buys')||[];
-  ok('old version-1 backup loads into an empty browser',b.length===1&&b[0].a==='SXR8'&&b[0].q===1&&b[0].p===732.58,JSON.stringify(b));
+  ok('old version-1 backup loads into an empty browser',b.length===1&&b[0].a==='SXR8'&&b[0].q===1&&b[0].p===700,JSON.stringify(b));
   ok('migrated purchase gets its split reference (r, u)',b[0]&&Array.isArray(b[0].r)&&b[0].r[0]==='2026-10-01'&&/^\d{4}-\d{2}-\d{2}$/.test(b[0].u),JSON.stringify(b[0]));
   ok('browser and file marked as identical',get('savedAt')===V1.exported&&get('fileSaved')===V1.exported,get('savedAt'));
   ok('status: backup file has all the data',/has all your data/.test(txt('#bkState')),txt('#bkState'));
@@ -123,7 +123,7 @@ const SC={
  legacy:{prep(d){d.backup=V1;seed({buys:[{id:'new1',a:'AAPL',d:'2026-09-01',q:2,p:200}],lots:[],savedAt:'2026-10-03T18:00:00.000Z'});},test(){
   const b=get('buys')||[];
   ok('legacy data: purchase deleted before tombstones existed does not come back',b.length===1&&b[0].id==='new1',JSON.stringify(b.map(x=>x.id)));
-  ok('legacy data: the deleted id is now remembered','musjvneia0ov' in (get('deleted')||{}));
+  ok('legacy data: the deleted id is now remembered','v1sample0001' in (get('deleted')||{}));
   ok('legacy data: asks to update the backup file',/not in the backup file/.test(txt('#bkState')),txt('#bkState'));}},
 
  merge:{prep(d){d.backup={app:'Bluechip Board',version:4,saved:'2026-10-03T12:00:00.000Z',buys:[{id:'A',a:'AAPL',d:'2026-09-01',q:1,p:200},{id:'B',a:'NVDA',d:'2026-09-02',q:3,p:150}],lots:[],sales:[],deleted:{}};
@@ -921,7 +921,7 @@ const SC={
   ok('entries from the file get their split reference (r, u)',b.filter(x=>['EUNK','IS3N','EUNN'].includes(x.a)).every(x=>/^\d{4}-\d{2}-\d{2}$/.test(x.u)),JSON.stringify(b));
   ok('holdings from the backup',near(api.pfDados().find(x=>x.id==='EUNN').q,0.5)&&near(api.pfDados().find(x=>x.id==='IS3N').q,3.5));
   const r=api.juntaBackup(V1,false),b2=JSON.parse(localStorage.getItem('bb.buys'))||[];
-  ok('restoring an old version-1 backup keeps the ETF entries',b2.some(x=>x.id==='B1')&&b2.some(x=>x.id==='musjvneia0ov'&&x.a==='SXR8'),JSON.stringify(b2.map(x=>x.id)));
+  ok('restoring an old version-1 backup keeps the ETF entries',b2.some(x=>x.id==='B1')&&b2.some(x=>x.id==='v1sample0001'&&x.a==='SXR8'),JSON.stringify(b2.map(x=>x.id)));
   ok('the backup the page writes keeps the new ETFs (same format)',['EUNK','IS3N','EUNN'].every(a=>b2.some(x=>x.a===a))&&Object.keys(b2[0]).every(k=>['id','a','d','q','p','r','u'].includes(k)));}},
 
  etfmissing:{prep(d){const a=d.ativos.find(x=>x.id==='EUNK');a.pontos=[];d.historico.EUNK=[];
