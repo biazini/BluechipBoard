@@ -1003,11 +1003,15 @@ const SC={
   ok('Anexo J: €10.005 and €20.005 entered give €10.01 and €20.01 (not €10.00 and €20.00), gain €10.00',r&&r.aq===10.01&&r.vd===20.01&&r.ganho===10,JSON.stringify(r&&[r.aq,r.vd,r.ganho]));}},
  /* preços atrasados: o alerta de movimento diz de quando é, e o "Latest daily move" da carteira não o soma como de hoje */
  stalemove:{prep(d){const a=d.ativos.find(x=>x.id==='NVDA'),P=a.pontos.map(pair).slice(0,-8);P[P.length-1]=[P[P.length-1][0],+(P[P.length-2][1]*1.07).toFixed(4)];a.pontos=P;a.parcial=false;a.fonte='Yahoo Finance';G.nvdaIso=P[P.length-1][0];
-   seed({buys:[{id:'s1',a:'NVDA',d:'2026-01-05',q:2,p:150},{id:'s2',a:'SXR8',d:'2026-01-05',q:1,p:600}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(api){
+   seed({buys:[{id:'s1',a:'NVDA',d:'2026-01-05',q:2,p:150}],lots:[{id:'s2',d:'2026-01-05',q:0.01,c:600}],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(api){   /* Bitcoin (24/7) tem sempre o preço do dia */
   const al=api.alerts().filter(x=>x.co==='NVDA'&&/rose|fell/.test(x.txt));
   ok('stale prices: the daily-move alert says the date of that move ("not today") instead of "in the last session"',al.length===1&&al[0].txt.includes('(the latest price available, not today)')&&/the news of that day/.test(al[0].txt)&&!/today's news/.test(al[0].txt),al.map(x=>x.txt).join(' | '));
-  const R=api.pfDados(),nv=R.find(x=>x.id==='NVDA'),sx=R.find(x=>x.id==='SXR8');
+  const R=api.pfDados(),nv=R.find(x=>x.id==='NVDA'),sx=R.find(x=>x.id==='BTC');
   ok('portfolio: the latest daily move leaves out the asset whose price is not current, and names it',nv.velho===true&&sx.velho===false&&/without NVIDIA \(price not current\)/.test(txt('#pfKpis')),txt('#pfKpis'));}},
+ staleall:{prep(d){const a=d.ativos.find(x=>x.id==='NVDA');a.pontos=a.pontos.map(pair).slice(0,-8);a.parcial=false;a.fonte='Yahoo Finance';
+   seed({buys:[{id:'s1',a:'NVDA',d:'2026-01-05',q:2,p:150}],lots:[],sales:[],deleted:{},savedAt:'2026-10-03T10:00:00.000Z'});},test(){
+  const k=[...document.querySelectorAll('#pfKpis .kpi')].find(x=>/Latest daily move/.test(x.textContent));
+  ok('portfolio with no current price at all: the latest daily move is "—" (not €0)',k&&k.querySelector('.v').textContent.trim()==='—'&&/without NVIDIA/.test(k.textContent),k&&k.textContent);}},
  /* reação aos resultados: um preço intradiário (sessão aberta) não conta como fecho da sessão de reação */
  earnpartial:{prep(d){const a=d.ativos.find(x=>x.id==='AAPL'),H=d.historico.AAPL.map(pair),L=H[H.length-1][0],E=H[H.length-10][0];a.parcial=true;a.hora=d.geradoEm;
    const P=a.pontos.map(pair);if(P[P.length-1][0]!==L)P.push([L,H[H.length-1][1]]);a.pontos=P;G.L=L;G.E=E;

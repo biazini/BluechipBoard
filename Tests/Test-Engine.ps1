@@ -701,6 +701,19 @@ Check 'a huge jump on the latest price is kept but flagged in the source row' ($
 $r = Remove-PicoIsolado @(@('2026-01-01', 50), @('2026-01-02', 20), @('2026-01-03', 51))
 Check 'a deep isolated dip (to 40% of both neighbours) is also dropped' ($r.removidos -eq 1 -and @($r.pontos).Count -eq 2)
 
+# --- depois do fecho, a vela diária da sessão ainda em falta no Yahoo: o fecho vem da cotação (regularMarketPrice) ---
+${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) return $Script:Resposta }
+$ultT = 1759224600 + 5 * 86400; $depois = $ultT + 86400 + 40000   # dia seguinte à última vela, 16:36 em Nova Iorque
+$Script:Resposta = (Yahoo 'AAPL' 'USD' @(100, 101, 102, 103, 104, 105)).Replace('"regularMarketPrice":5,', '"regularMarketPrice":106.5,').Replace('"regularMarketTime":' + ($ultT + 23400), '"regularMarketTime":' + $depois)
+$s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+Check 'session closed but its daily bar missing: the close comes from the quote of that day, and the source row says so' ($s.pontos.Count -eq 7 -and $s.pontos[-1][0] -eq '2025-10-06' -and $s.pontos[-1][1] -eq 106.5 -and $Script:Fontes[-1].erro -match 'close of 2025-10-06 from the quote') "$($s.pontos[-1] -join ' ') / $($Script:Fontes[-1].erro)"
+$Script:Resposta = (Yahoo 'AAPL' 'USD' @(100, 101, 102, 103, 104, 105)).Replace('"regularMarketTime":' + ($ultT + 23400), '"regularMarketTime":' + $depois)
+$s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+Check 'an implausible quote (5 against a close of 105) is not added' ($s.pontos.Count -eq 6 -and $s.pontos[-1][0] -eq '2025-10-05')
+$Script:Resposta = Yahoo 'AAPL' 'USD' @(100, 101, 102, 103, 104, 105)
+$s = Get-Serie @{ Id = 'AAPL'; Nome = 'Apple'; Yahoo = 'AAPL'; Stooq = ''; Moeda = 'USD' }
+Check 'quote of the same day as the last bar: nothing added' ($s.pontos.Count -eq 6)
+
 # --- Kraken: os mesmos controlos de preço do Yahoo ---
 $kr = '{"error":[],"result":{"XXBTZEUR":[' + ((0..9 | ForEach-Object { $t = $Script:Agora.AddDays(-9 + $_).ToUnixTimeSeconds(); $c = @('60000', '0', '-5', 'abc', '61000', '62000', '63000', '64000', '65000', '66000')[$_]; "[$t,""1"",""1"",""1"",""$c"",""1"",""1"",1]" }) -join ',') + '],"last":1}}'
 ${function:Get-Url} = { param([string]$Url, [string]$UserAgent, [int]$Timeout) if ($Url -match 'kraken') { return $kr }; throw 'Yahoo offline' }

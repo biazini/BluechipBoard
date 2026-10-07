@@ -1295,9 +1295,20 @@ function Get-Serie([hashtable]$Ativo, [int64]$Desde = 0, $Referencia = $null) {
             $sessao = $res.meta.currentTradingPeriod.regular; $ini = [int64]$sessao.start; $fim = [int64]$sessao.end; $hora = [int64]$res.meta.regularMarketTime
             if ($fim -gt 0 -and $hora -ge $ini -and $hora -lt $fim -and $Script:Agora.ToUnixTimeSeconds() -lt $fim) { $parcial = $true }
         } catch { }
+        # Depois do fecho, o Yahoo às vezes ainda não tem a vela diária dessa sessão (visto a 7 out 2026 à 01:17: séries até 5 out,
+        # com o fecho de 6 out só no regularMarketPrice/regularMarketTime). Com a sessão terminada, esse preço é o fecho oficial
+        # do dia: entra como último ponto, se for plausível (a 50 % do anterior), e a fonte diz de onde veio.
+        $notaFecho = ''
+        if (-not $parcial -and $res.meta.regularMarketTime) {
+            $tM = [DateTimeOffset]::FromUnixTimeSeconds([int64]$res.meta.regularMarketTime); $diaM = & $diaBolsa $tM; $pM = 0.0
+            if ([string]::CompareOrdinal($diaM, $pts[-1][0]) -gt 0 -and $tM -le $Script:Agora.AddMinutes(5) -and [double]::TryParse("$($res.meta.regularMarketPrice)", [Globalization.NumberStyles]::Float, $Script:Inv, [ref]$pM) -and $pM -gt 0 -and [math]::Abs($pM / [double]$pts[-1][1] - 1) -le 0.5) {
+                $notaFecho = "close of $diaM from the quote (the daily series ended on $($pts[-1][0]))"
+                $pts = @($pts) + @(, @($diaM, [math]::Round($pM, 4)))
+            }
+        }
         $horaUltimo = $null; if ($res.meta.regularMarketTime) { $horaUltimo = [DateTimeOffset]::FromUnixTimeSeconds([int64]$res.meta.regularMarketTime).ToString('o') }
         # o último ponto não pode ser comparado com o seguinte: um salto enorme fica assinalado na fonte (não é apagado)
-        $notas = @(); if ($invalidos) { $notas += "$invalidos invalid price(s) ignored" }
+        $notas = @(); if ($invalidos) { $notas += "$invalidos invalid price(s) ignored" }; if ($notaFecho) { $notas += $notaFecho }
         $salto = [double]$pts[-1][1] / [double]$pts[-2][1] - 1
         if ([math]::Abs($salto) -gt 0.5) { $notas += ('latest price {0:+0;-0}% from the previous close: check it' -f ($salto * 100)) }
         Add-Fonte $nome 'prices' $u 'ok' $pts.Count $sw.ElapsedMilliseconds ($notas -join '; ')
@@ -3458,7 +3469,7 @@ function drawPf(){if(!$('#tbl-pf'))return;const R=pfDados(),tv=R.reduce((a,x)=>a
  $('#pf-tv').textContent=tv?eur(tv,2):'—';$('#pf-tc').textContent=tc?eur(tc,2):'—';const tgc=$('#pf-tg');tgc.className='num '+(G.length?cls(tg):'');tgc.innerHTML=G.length?`${eurS(tg,2)} <small>${tc?pct(tg/tc*100):''}</small>`:'—';$('#pf-tw').textContent=tv?'100%':'—';
  if(!tv){$('#pfKpis').innerHTML=`<p class="empty">${ic('wallet')}${falta.length?`No current price for ${falta.map(x=>esc(x.n)).join(', ')} in this run (see Sources &amp; method), so the portfolio cannot be valued.`:'Add your purchases below (and Bitcoin purchases in the Bitcoin section) to see your portfolio in euros.'}</p>`;empty($('#ch-pf-alloc'),'Nothing to show yet.');empty($('#ch-pf-exp'),'Nothing to show yet.');return;}
  $('#pfKpis').innerHTML=kpi('wallet','Portfolio value',eur(tv),falta.length?`without ${falta.map(x=>esc(x.n)).join(', ')} (no current price)`:'in euros, at the latest prices')+kpi('euro','Invested',eur(tc),nv?'cost of what you still hold':'total paid')+kpi('chart','Gain',eurS(tg),tc?pct(tg/tc*100):'',cls(tg))+
-  (nv?kpi('check','Realised gain',eurS(real),`on ${nv} sale${nv>1?'s':''} (oldest purchases first)`,cls(real)):'')+kpi('activity','Latest daily move',eurS(dia),'last session (Bitcoin: since 00:00 UTC)'+(diaFora.length?` · without ${diaFora.map(x=>esc(x.n)).join(', ')} (price not current)`:''),cls(dia));
+  (nv?kpi('check','Realised gain',eurS(real),`on ${nv} sale${nv>1?'s':''} (oldest purchases first)`,cls(real)):'')+kpi('activity','Latest daily move',R.some(x=>x.v&&!x.velho)?eurS(dia):'—','last session (Bitcoin: since 00:00 UTC)'+(diaFora.length?` · without ${diaFora.map(x=>esc(x.n)).join(', ')} (price not current)`:''),cls(dia));
  const fat=R.filter(x=>x.v>0).map(x=>[ehEtf(x.id)?'ETF '+x.id:x.n,x.v/tv*100,CO[x.id].c,x.v]);
  $('#ch-pf-alloc').innerHTML='<div class="dist" role="img" aria-label="'+fat.map(x=>`${x[0]} ${nf(x[1],1)}%`).join(', ')+'">'+fat.map(x=>`<div data-tip="${esc(x[0])}: ${nf(x[1],1)}% (${eur(x[3])})" style="width:${x[1]}%;background:${x[2]}"></div>`).join('')+'</div><ul class="etf-legend">'+fat.map(x=>`<li style="--c:${x[2]}"><span class="dot"></span><span class="nm">${esc(x[0])}</span><span class="bar"><i style="width:${x[1]}%"></i></span><b>${nf(x[1],1)}%</b></li>`).join('')+'</ul>';
  /* exposição real: o que tem diretamente + o que tem através de cada ETF (valor do ETF × peso da empresa nesse fundo).
