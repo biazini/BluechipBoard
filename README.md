@@ -39,6 +39,24 @@ After a run without errors, the launcher starts a hidden background process (`Bl
 - Each card shows the time of its latest trade (`live 15:42`), or `close 6 Oct` once the session is over.
 - The header shows the state: *Live prices, updated 15:43*, *connecting…*, *the source is not answering*, *stopped* or *off*.
 
+```mermaid
+sequenceDiagram
+    participant L as Launcher
+    participant P as Live process (127.0.0.1)
+    participant Y as Yahoo
+    participant B as Page in the browser
+    L->>P: start, hidden (-Live)
+    loop every minute while a page is open
+        P->>Y: one request for the 12 symbols
+        Y-->>P: latest prices
+        B->>P: GET /quotes (also means still open)
+        P-->>B: prices, with their time and day
+        B->>B: add to the series, redraw cards, alerts and portfolio
+    end
+    B->>P: POST /bye (page closed or reloaded)
+    Note over P: ends 20 s later if no page comes back,<br/>or after 5 minutes without any request
+```
+
 Its limits and safeguards:
 
 - **Local only.** It listens on `127.0.0.1:47821` and answers only the board opened from the disk. Any other website is refused.
@@ -97,12 +115,14 @@ How the register works:
 
 Your entries live in the browser (`localStorage`) and in **`bluechip-board-backup.json`** in this folder:
 
-```text
-you add / sell / delete ─► browser ─► "Save to project folder" (then automatic while the page is open)
-                                          ▼
-                              bluechip-board-backup.json ─► next run embeds it in bluechip-board.html
-                                                                 ▼
-                              the page opens and MERGES it with the browser, entry by entry (nothing lost)
+```mermaid
+flowchart TD
+    U([You add, sell or delete]) --> LS[(Browser<br/>localStorage)]
+    LS -->|Save to project folder,<br/>then automatic| F[(bluechip-board-backup.json)]
+    LS -.->|browser cannot write to folders| DL[(Downloads)]
+    DL -.->|next run, if newer and valid| F
+    F -->|next run embeds it| H[bluechip-board.html]
+    H -->|page opens: merged<br/>entry by entry| LS
 ```
 
 1. **Portfolio → Backup → Save to project folder.** The first time, choose this folder; another folder is refused. From then on every change is saved automatically while the page is open.
@@ -120,6 +140,16 @@ The backup also keeps your targets, policy, notes and fees. Only `bluechip-board
   - `AnexoJ_Stocks_ETFs_<year>.csv` for Quadro 9.2A;
   - `AnexoJ_Crypto_<year>.csv` for Quadro 9.4A.
 - **Export dividends (Quadro 8A)** gives `AnexoJ_Dividends_<year>.csv`.
+
+```mermaid
+flowchart LR
+    R[(Register:<br/>purchases, sales, fees)] --> C[FIFO: each sale uses<br/>the oldest purchases]
+    C -->|stock or ETF| J1[AnexoJ_Stocks_ETFs_year.csv<br/>Quadro 9.2A]
+    C -->|Bitcoin under 365 days| J2[AnexoJ_Crypto_year.csv<br/>Quadro 9.4A]
+    C -->|Bitcoin 365 days or more| J3[Listed as Not Anexo J<br/>Anexo G1, Quadro 7]
+    DV[(Dividends of Apple, NVIDIA<br/>and Alphabet, from Yahoo)] --> J4[AnexoJ_Dividends_year.csv<br/>Quadro 8A]
+    C -->|shares held on each ex-date| J4
+```
 
 What goes in them:
 
@@ -143,21 +173,27 @@ What goes in them:
 
 ## How it works
 
-```text
-Desktop shortcut ─► Install-Shortcut.ps1 creates it (pwsh.exe ─► Start-BluechipBoard.ps1)
-        ▼
-Start-BluechipBoard.ps1   launcher: runs the script; keeps the window open on problems; then starts -Live (hidden)
-        ▼
-Bluechip-Board.ps1 ◄── ~80 public sources: news feeds, Yahoo, Nasdaq, SEC, ECB, iShares, CoinGecko, mempool.space…
-   collect ─► validate ─► classify news ─► build one HTML page (data embedded as JSON)
-        │  reads   bluechip-board-backup.json (your data) · bluechip-board-data.json (previous run, fallback)
-        │          vistos.json ("New" tag) · noticias-historico.json (400 days of important news)
-        ▼  writes
-bluechip-board.html (with your backup) · Archive\bluechip-board-<date>.html (without it) · the files above
-        ▼
-Browser: the page works offline; your entries ─► localStorage ─► backup file
-        ▲ every minute while open
-Bluechip-Board.ps1 -Live  (127.0.0.1 only; ends with the page)
+![Architecture: shortcut, launcher, script, sources, local files, website, browser and the live-prices process](docs/architecture.drawio.svg)
+
+*Edit it in VS Code with the Draw.io Integration extension (open `docs/architecture.drawio.svg`).*
+
+**One run, step by step:**
+
+```mermaid
+flowchart TD
+    A([Desktop shortcut]) --> B[Start-BluechipBoard.ps1]
+    B --> C{Another run<br/>in progress?}
+    C -- yes --> X([Warning, nothing written])
+    C -- no --> D[News: ~35 feeds + SEC filings]
+    D --> E[Classify, group duplicates,<br/>update the news history]
+    E --> F[Prices, EUR/USD, ETF holdings, dividends,<br/>Bitcoin, calendar, SEC, ECB]
+    F --> G[Backup: bring a newer one from Downloads,<br/>read bluechip-board-backup.json]
+    G --> H[Build the page:<br/>all data as JSON inside the template]
+    H --> I[Write each file safely:<br/>Archive, site, data, vistos, history]
+    I --> J([Open the browser])
+    J --> K([Start the live-prices process, hidden])
+    F -. a source fails .-> FB[Its fallback, labelled,<br/>or Unavailable]
+    FB -.-> G
 ```
 
 Design rules:
@@ -166,6 +202,18 @@ Design rules:
 - **Validated data.** Wrong symbol or currency, zero or impossible prices are refused.
 - **Safe writes.** Files are written to a temporary file and swapped in, so a run that fails halfway changes nothing. Two runs at once are blocked.
 - **Your data stays local.** Only public data is downloaded. Your portfolio lives in the browser and the backup file.
+
+**When a price source fails:**
+
+```mermaid
+flowchart LR
+    Y[Yahoo chart API] -->|ok| OK([Price with its date])
+    Y -->|fails or invalid| K[Kraken for Bitcoin<br/>Nasdaq for US stocks,<br/>checked against the previous run]
+    K -->|ok| OK2([Price, via Kraken or Nasdaq])
+    K -->|fails| P[Previous run's data]
+    P -->|found| OLD([Price marked previous run,<br/>orange date and an alert])
+    P -->|none| NA([No price: nothing invented])
+```
 
 ### Files
 
@@ -177,6 +225,7 @@ Design rules:
 | `Bluechip-Board.ico` | The shortcut's icon. | yes |
 | `bluechip-board.config.example.json` | Template for `bluechip-board.config.json`. | yes |
 | `Tests\`, `.github\workflows\tests.yml` | Test suites and their fixtures; GitHub Actions. | yes |
+| `docs\architecture.drawio.svg` | The architecture diagram (draw.io). | yes |
 | `bluechip-board.config.json` | Your SEC e-mail. | **no** (personal) |
 | `bluechip-board-backup.json` (+ `.previous.json`) | Your purchases, sales, targets, policy, notes and fees. | **no** (personal) |
 | `bluechip-board.html` | The website. It embeds your backup. | **no** (personal; rebuilt every run) |
@@ -270,9 +319,15 @@ Use `powershell` (and leave out `-Shell pwsh`) for Windows PowerShell 5.1. Run a
 
 The GitHub repository `biazini/BluechipBoard` (private) is the source of truth. Your data and the outputs never go into git (`.gitignore`).
 
-```text
-git switch -c <name>  ─► edit ─► 3 suites on 5.1 and 7 ─► commit ─► push ─► pull request (CI) ─► merge
-git switch main ; git pull ; git branch -d <name>
+```mermaid
+flowchart LR
+    A[git switch -c name] --> B[Edit]
+    B --> C[3 test suites<br/>on PowerShell 5.1 and 7]
+    C -->|a check fails| B
+    C -->|all pass| D[Commit and push]
+    D --> E[Pull request:<br/>GitHub Actions runs the tests]
+    E -->|green| F[Merge into main]
+    F --> G[git switch main, git pull,<br/>git branch -d name]
 ```
 
 `git status` must never list your backup, the config file or an output. Use `git log` and `git revert <commit>` to go back: your data is not affected.
@@ -293,6 +348,7 @@ git switch main ; git pull ; git branch -d <name>
 - **PowerShell 7 is slow on .NET method calls** (about 10 µs each on 7.6). In loops over thousands of items use hashtables by index, arrays and operators.
 - **Windows PowerShell 5.1:** arrays out of a pipeline can become `{value, Count}` in JSON. Build pairs in a plain `foreach`.
 - **Dates as text:** always `.ToString('yyyy-MM-dd', $Script:Inv)`.
+- **Diagrams.** The flowcharts are Mermaid blocks in the Markdown (GitHub and VS Code draw them). The architecture is `docs/architecture.drawio.svg`, a picture that draw.io can edit. Keep them in step with the code.
 - **Never edit the outputs** (`bluechip-board.html`, the data file): change the template and run again.
 
 ### Code map
