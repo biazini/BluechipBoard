@@ -40,21 +40,37 @@ After a run without errors, the launcher starts a hidden background process (`Bl
 - The header shows the state: *Live prices, updated 15:43*, *connecting…*, *the source is not answering*, *stopped* or *off*.
 
 ```mermaid
+%%{init: {'sequence': {'mirrorActors': false}}}%%
 sequenceDiagram
-    participant L as Launcher
-    participant P as Live process (127.0.0.1)
-    participant Y as Yahoo
-    participant B as Page in the browser
-    L->>P: start, hidden (-Live)
-    loop every minute while a page is open
-        P->>Y: one request for the 12 symbols
-        Y-->>P: latest prices
-        B->>P: GET /quotes (also means still open)
-        P-->>B: prices, with their time and day
-        B->>B: add to the series, redraw cards, alerts and portfolio
+    autonumber
+    actor U as You
+    box transparent This PC
+        participant L as Launcher
+        participant B as Page in the browser
+        participant P as Live process<br/>127.0.0.1:47821
     end
-    B->>P: POST /bye (page closed or reloaded)
-    Note over P: ends 20 s later if no page comes back,<br/>or after 5 minutes without any request
+    box transparent Internet
+        participant Y as Yahoo Finance
+    end
+    rect rgba(88,166,255,0.12)
+        U->>L: double-click the shortcut
+        L->>B: run the board, open the page
+        L-)P: start it, hidden (-Live)
+    end
+    rect rgba(63,185,80,0.12)
+        loop every minute, while the page is open
+            P->>+Y: one request for the 12 symbols
+            Y-->>-P: latest prices
+            B->>+P: GET /quotes (also: still open)
+            P-->>-B: prices, with the time and day of each
+            Note over B: added to the price series, then<br/>cards, alerts and portfolio redrawn
+        end
+    end
+    rect rgba(210,153,34,0.12)
+        U->>B: close the page
+        B-)P: POST /bye
+        Note over P: ends 20 s later if no page comes back,<br/>or after 5 minutes without any request
+    end
 ```
 
 Its limits and safeguards:
