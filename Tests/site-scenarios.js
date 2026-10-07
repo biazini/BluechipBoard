@@ -1076,7 +1076,8 @@ const SC={
   const n=V.aplica({versao:1,obtidoEm:new Date(em).toISOString(),cotacoes:{BTC:{preco:bl[1],hora:new Date(em).toISOString(),dia:new Date(em).toISOString().slice(0,10),parcial:true,moeda:'EUR'}},erro:null});
   const f1=api.frescura('NVDA',N.pts);
   ok('live prices: NVIDIA not updated for 5 days while Bitcoin is: NVIDIA is shown as behind, and its alert says so',n===1&&f1&&f1.velho&&f1.falta>=2&&api.alerts().some(a=>a.co==='NVDA'&&/behind/.test(a.txt)),JSON.stringify({n,f0,f1}));}},
- nolive:{test(api){ok('without the live port in the data (Archive copies, test pages): no live status and no requests',!api.vivo.VIVO&&!document.querySelector('#vivoEst'));}},
+ nolive:{test(api){ok('without the live port in the data (Archive copies, test pages): no live status and no requests',!api.vivo.VIVO&&!document.querySelector('#vivoEst'));
+  ok('the generation time appears once, in the footer (not in the snapshot header)',!/Generated on/.test(txt('#heroSub'))&&/News from the last/.test(txt('#heroSub'))&&/Updated \d{1,2} [A-Z][a-z]{2} \d{4}, \d{1,2}:\d{2} Lisbon time/.test(txt('#foot')),txt('#heroSub')+' | '+txt('#foot'));}},
  corrupt:{raw:'{"geradoEm": broken',after(){ok('unreadable data: the page says so instead of going blank',/could not be read/.test(txt('#main .callout')),txt('#main .callout'));}}
 };
 const sc=SC[S];
