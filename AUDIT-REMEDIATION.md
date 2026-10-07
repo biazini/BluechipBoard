@@ -6,7 +6,7 @@ Record of the fixes made after the technical audit of Bluechip Board, carried ou
 
 **How to read this file.** The **[follow-up of 7 Oct 2026](#post-remediation-follow-up--7-oct-2026)** (at the end) re-checked every finding below, fixed what could be fixed and records the decisions; the rows of Open items it changed carry a "7 Oct 2026" note. Start with **[Open items](#open-items--6-oct-2026)**: everything still to decide, fix or watch, in one place. The audit sections (Critical to Testing gap) record the state on 4 Oct 2026 and are kept as they were written. Later work is in the dated change logs at the end. The [status review](#status-review--5-oct-2026) says which audit findings still applied on 5 Oct.
 
-**Current test counts (7 Oct 2026, with live prices):** engine 278, site 463, resilience 73, all passing on Windows PowerShell 5.1 and PowerShell 7 (after the remediation: 251, 436, 62; 6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
+**Current test counts (7 Oct 2026, with live prices):** engine 278, site 469, resilience 73, all passing on Windows PowerShell 5.1 and PowerShell 7 (after the remediation: 251, 436, 62; 6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
 
 **Test suites at the end of the remediation** (all in `Tests\`, see the README):
 
@@ -1057,3 +1057,11 @@ All pass on Windows PowerShell 5.1 and PowerShell 7.
 | R13 | The Yahoo spark endpoint is unofficial and could change or require authentication, as `quote` did in 2023 | The page then says *the source is not answering* and keeps the latest prices with their time; the daily run is unaffected (it uses the chart endpoint). |
 | R14 | Another program could take port 47821 | The process does not start and the launcher window shows the warning; change `Porta` in `$Vivo`. |
 | R15 | A browser could freeze a background tab for more than 5 minutes | The process then ends (as if the page had closed); the page says *Live prices stopped* and the shortcut restarts it. |
+
+## Change log · 7 Oct 2026 · Next halving countdown (Bitcoin)
+
+- **Bitcoin indicators.** The row of indicators at the top of the Bitcoin section has a fifth one, **Next halving**: the days left, counted up and refreshed every minute while the page is open, with its approximate date underneath.
+  - The date is the run's network forecast (mempool.space, at the average block time since the last halving), labelled *forecast*. It is the same date and number of days as the *Next halving* card below; the card now also counts the days up, so the two agree.
+  - Without the network data, the calendar's rough estimate (210,000 blocks of 10 minutes after the last known halving) is used and labelled *rough estimate*. Without either, it shows "—": no date is invented.
+- **Layout.** 5 columns from 981 px; below, 2 columns with the halving across the full width (measured at 900, 1,920 and 3,840 px, no horizontal overflow).
+- **Tests.** Site +6 (`halving`), on PowerShell 5.1 and 7.

@@ -1076,6 +1076,18 @@ const SC={
   const n=V.aplica({versao:1,obtidoEm:new Date(em).toISOString(),cotacoes:{BTC:{preco:bl[1],hora:new Date(em).toISOString(),dia:new Date(em).toISOString().slice(0,10),parcial:true,moeda:'EUR'}},erro:null});
   const f1=api.frescura('NVDA',N.pts);
   ok('live prices: NVIDIA not updated for 5 days while Bitcoin is: NVIDIA is shown as behind, and its alert says so',n===1&&f1&&f1.velho&&f1.falta>=2&&api.alerts().some(a=>a.co==='NVDA'&&/behind/.test(a.txt)),JSON.stringify({n,f0,f1}));}},
+ /* próximo halving na fila de indicadores da Bitcoin: dias que faltam e a data aproximada */
+ halving:{prep(d){G.rd=d.bitcoin&&d.bitcoin.rede?JSON.parse(JSON.stringify(d.bitcoin.rede)):null;},test(api){
+  const ks=[...document.querySelectorAll('#btcKpis .kpi')],e=document.getElementById('k-halv'),t=Date.parse(G.rd&&G.rd.halvingPrevisto),dd=Math.max(0,Math.ceil((t-Date.now())/864e5));
+  ok('Bitcoin indicators: a fifth one, "Next halving", after the volatility',ks.length===5&&ks[4]===e&&/Next halving/.test(txt('#k-halv .k'))&&/Volatility/.test(ks[3].textContent),ks.map(k=>k.textContent).join(' | '));
+  ok('next halving: the days left (counted up) and the approximate date of the network forecast',G.rd&&txt('#k-halv .v')===api.nf(dd,0)+(dd===1?' day':' days')&&txt('#k-halv .s')==='≈ '+api.fdt(t)+' · forecast',txt('#k-halv'));
+  ok('next halving: the same number of days as the "Next halving" card below',(txt('#btcHalv .big-v b')||'')===api.nf(dd,0),txt('#btcHalv .big-v b'));
+  const cols=getComputedStyle(document.getElementById('btcKpis')).gridTemplateColumns.split(' ').filter(Boolean).length;
+  ok('the Bitcoin indicators fit in 5 columns on a wide screen (2 on a narrow one, the halving across)',innerWidth<=980||cols===5,cols+' at '+innerWidth+'px');
+  api.D.bitcoin.rede=null;api.contaHalving();const ev=api.calendar().find(x=>x.e==='BTC'&&/halving/i.test(x.ev||''));
+  ok('without the network data: the calendar estimate, called a rough estimate',ev&&txt('#k-halv .s')==='≈ '+api.fdt(ev.t)+' · rough estimate'&&/10 minutes/.test(e.title),txt('#k-halv .s')+' | '+e.title);
+  api.D.calendario=[];api.contaHalving();
+  ok('without the network data nor a calendar estimate: no date invented',txt('#k-halv .v')==='—'&&/no network data/.test(txt('#k-halv .s')),txt('#k-halv'));}},
  nolive:{test(api){ok('without the live port in the data (Archive copies, test pages): no live status and no requests',!api.vivo.VIVO&&!document.querySelector('#vivoEst'));
   ok('the generation time appears once, in the footer (not in the snapshot header)',!/Generated on/.test(txt('#heroSub'))&&/News from the last/.test(txt('#heroSub'))&&/Updated \d{1,2} [A-Z][a-z]{2} \d{4}, \d{1,2}:\d{2} Lisbon time/.test(txt('#foot')),txt('#heroSub')+' | '+txt('#foot'));}},
  corrupt:{raw:'{"geradoEm": broken',after(){ok('unreadable data: the page says so instead of going blank',/could not be read/.test(txt('#main .callout')),txt('#main .callout'));}}
