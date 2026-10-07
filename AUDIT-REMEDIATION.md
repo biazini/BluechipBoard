@@ -4,9 +4,9 @@ Record of the fixes made after the technical audit of Bluechip Board, carried ou
 
 **Status key:** FIXED · PARTIALLY FIXED (the local handling is done, but an external limit remains) · NOT FIXED (with the reason).
 
-**How to read this file.** Start with **[Open items](#open-items--6-oct-2026)**: everything still to decide, fix or watch, in one place. The audit sections (Critical to Testing gap) record the state on 4 Oct 2026 and are kept as they were written. Later work is in the dated change logs at the end. The [status review](#status-review--5-oct-2026) says which audit findings still applied on 5 Oct.
+**How to read this file.** The **[follow-up of 7 Oct 2026](#post-remediation-follow-up--7-oct-2026)** (at the end) re-checked every finding below, fixed what could be fixed and records the decisions; the rows of Open items it changed carry a "7 Oct 2026" note. Start with **[Open items](#open-items--6-oct-2026)**: everything still to decide, fix or watch, in one place. The audit sections (Critical to Testing gap) record the state on 4 Oct 2026 and are kept as they were written. Later work is in the dated change logs at the end. The [status review](#status-review--5-oct-2026) says which audit findings still applied on 5 Oct.
 
-**Current test counts (6 Oct 2026):** engine 212, site 416, resilience 56, all passing on Windows PowerShell 5.1 and PowerShell 7. The table below has the counts at the end of the remediation.
+**Current test counts (7 Oct 2026):** engine 251, site 436, resilience 62, all passing on Windows PowerShell 5.1 and PowerShell 7 (6 Oct: 212, 416, 56). The table below has the counts at the end of the remediation.
 
 **Test suites at the end of the remediation** (all in `Tests\`, see the README):
 
@@ -38,12 +38,12 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 |---|---|---|---|
 | D1 | **Quadro 8A code** for dividends: the export uses **E11** (no tax withheld in Portugal), the usual case with a foreign broker. | If a Portuguese entity withheld tax, use **E10** and fill in the *Imposto retido em Portugal* columns. | `ANEXO_J.q8a.codigo` (template) |
 | D2 | **Anexo J interpretations:** G20 for UCITS ETFs (some advisers use G01); "País da fonte" = the issuer's country. | Confirm with an accountant; review the form and instructions every year before filing. | `ANEXO_J` |
-| D3 | **FRED series not implemented** (yield curve 10y−3m `T10Y3M`, high-yield spread `BAMLH0A0HYM2`, financial conditions `NFCI`). FRED (Akamai) resets or ignores the script's requests, on 5.1 and 7 and with an honest User-Agent; it answers only clients that identify as known tools such as curl. Posing as one would mean getting around a bot filter, so it was not done. | (a) let the script call Windows' `curl.exe` for FRED: an exception to "every source uses `Get-Url`", and it depends on FRED keeping that filter; (b) the curve from Yahoo `^TNX` − `^IRX`, an existing source; (c) NFCI from the Chicago Fed's own CSV (not verified yet); (d) leave it. The HY spread has no known public alternative. | Currency & Macroeconomics, note `#macroNao` |
+| D3 | **7 Oct 2026:** FRED still does not answer (timeout, honest User-Agent); the Chicago Fed's own NFCI CSV (option c) **does** answer (no key, weekly, 147 KB): verified, not implemented (a new indicator is your call). **FRED series not implemented** (yield curve 10y−3m `T10Y3M`, high-yield spread `BAMLH0A0HYM2`, financial conditions `NFCI`). FRED (Akamai) resets or ignores the script's requests, on 5.1 and 7 and with an honest User-Agent; it answers only clients that identify as known tools such as curl. Posing as one would mean getting around a bot filter, so it was not done. | (a) let the script call Windows' `curl.exe` for FRED: an exception to "every source uses `Get-Url`", and it depends on FRED keeping that filter; (b) the curve from Yahoo `^TNX` − `^IRX`, an existing source; (c) NFCI from the Chicago Fed's own CSV (not verified yet); (d) leave it. The HY spread has no known public alternative. | Currency & Macroeconomics, note `#macroNao` |
 | D4 | **S&P 500 CAPE not implemented:** no public CSV with current data. The GitHub/datahub `s-and-p-500` dataset has PE10 only until Sep 2023, then 0.0. | Implement only if a current CSV source appears (Shiller's `.xls` is not usable without modules). | — |
 | D5 | **Alert "below the 200-day average"** (`yellow`). It fires for weeks in ordinary corrections and adds to the distance-from-high alerts. | Proposal: make it informational (`white`), or show it only when the asset has no drop alert already. Not changed without your decision. | `alerts()` |
 | D6 | **ECB decisions in the calendar are `Medium`**, so they raise no Overview alert (a `High` event alerts 7 days before; task 15 asked for no new alerts). The Fed decisions are `High`, as before. | Change to `High` if you want the 7-day warning for the ECB too. | `$Calendario` |
 | D7 | **Top-holding news aliases** apply only to feeds without a `Dica`, so no story that was already classified changes. | Letting them replace a search feed's `Dica` is more precise, but it changes some assignments and needs the old engine test *"one EM company without keyword is only a weak feed match"* to be updated deliberately. | `Measure-Noticia`, `$AliasesPosicoes` |
-| D8 | **Alphabet gross margin is Unavailable:** Alphabet does not report `GrossProfit`. | Compute it as revenue − `CostOfRevenue` (a derivation, not a tag; not done). | `$MetricasSEC` |
+| D8 | **7 Oct 2026: kept Unavailable** (see the follow-up, D8). **Alphabet gross margin is Unavailable:** Alphabet does not report `GrossProfit`. | Compute it as revenue − `CostOfRevenue` (a derivation, not a tag; not done). | `$MetricasSEC` |
 | D9 | **Country exposure of SXR8 and EUNN** uses the index country, flagged as approximate (your choice of 6 Oct). iShares gives no country breakdown for these two funds. | Keep, or read another source. | `Get-AgregadosETF`, `PaisIndice` |
 | D10 | ~~Install git~~ **Done on 6 Oct 2026:** private repository `biazini/BluechipBoard`, CI in `.github\workflows\tests.yml`. The history starts with that import; the earlier per-task states exist only in the snapshots in the Recycle Bin (see E). | Optional: protect `main` (pull requests only) once the plan allows it. | — |
 
@@ -57,27 +57,27 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 | B4 | **Log scale (06):** only on the ETF long-term chart (Bitcoin is always log; the stocks have no long-term chart). |
 | B5 | **Fees (08):** the realised gain shown in the register does not deduct fees. They are used in the XIRR and in *Despesas e encargos* of the tax export. The sell simulation excludes fees, loss offsetting and *englobamento* (stated on the page). |
 | B6 | **Dividends for Quadro 8A (09):** Yahoo gives ex-dates only, so the tax year is the ex-date's year, and ex-dates in the last 45 days of the year are flagged `PAY_DATE_UNKNOWN`. The US withholding is an estimate (15 %, W-8BEN). Euros are a reference at the ex-date rate (`BROKER_FX`). The dividend data covers about 2 years back from each run. |
-| B7 | **SEC acceptance times (11):** the `acceptanceDateTime` of `data.sec.gov/submissions` is wrong for Apple: several hours late, 8 h in summer and 10 h in winter. The times come from the EDGAR 8-K Atom feed, which lists only the 40 latest 8-K (about 4 years). Older earnings have no time and no reaction session: AAPL 1, NVDA 5, GOOGL 1 on 6 Oct. |
+| B7 | **7 Oct 2026: resolved.** Every earnings 8-K now has its time: the ones missing from the Atom feed get it from their EDGAR filing header (`ACCEPTANCE-DATETIME`); on the real data 54 of 54 (AAPL 20, NVDA 21, GOOGL 13). **SEC acceptance times (11):** the `acceptanceDateTime` of `data.sec.gov/submissions` is wrong for Apple: several hours late, 8 h in summer and 10 h in winter. The times come from the EDGAR 8-K Atom feed, which lists only the 40 latest 8-K (about 4 years). Older earnings have no time and no reaction session: AAPL 1, NVDA 5, GOOGL 1 on 6 Oct. |
 | B8 | **SEC "recent" list:** about 1,000 filings, so for Alphabet (many Form 4) it reaches back only about 3 years (13 earnings releases). Older filings are in the extra files the JSON lists, which are not read. |
 | B9 | **Fundamentals (13):** the EPS of a 4th quarter = year − 9 months, an approximation (the share count changes during the year). Diluted shares of a 4th quarter are never derived (empty). Alphabet's diluted shares exist only since 2022. P/FCF uses the latest quarter's diluted shares, not a 4-quarter average. Splits are applied by each value's **filing date** (filings after a split are already adjusted). |
 | B10 | **News history (11–12):** it started on 6 Oct 2026, so *Big moves explained* shows "Before the news history" for earlier sessions until it fills up. It keeps material and important stories only. |
 | B11 | **Big moves (12):** a stock's moves also list *Market* stories (for the US stocks and SXR8). The thresholds `MOV_LIM` (4 % / 6 %) copy the daily-move alert of `alerts()`, and the rate-decision regex `JUROS_RE` copies `$DecisaoJuros` in the script. **Change both places together.** |
 | B12 | **Euro area inflation (15):** on 6 Oct 2026 the ECB Data Portal had HICP data only until **Dec 2025**, for U2, I8 and I9. The page shows the month and flags it as not recent. If it stays like this, check whether the ECB moved the series to another key (for example after Bulgaria joined the euro area in 2026). |
 | B13 | **Tab bar:** with ten tabs it fits from about 1,900 px. At 1,600–1,700 px it scrolls sideways, as it did before task 14. |
-| B14 | **Purchase form:** it still refuses a new sale when *any* existing sale lacks matching purchases (`C.vendas.find(x=>x.falta>0)` in `buildBuys`). It happens only with old or restored data. |
-| B15 | **Live prices** depend on Yahoo only (H5): Stooq blocks automated requests, and a second live source would need a key. |
+| B14 | **7 Oct 2026: fixed** (only the sale being added, or a sale it breaks, is refused; scenario `sellother`). **Purchase form:** it still refuses a new sale when *any* existing sale lacks matching purchases (`C.vendas.find(x=>x.falta>0)` in `buildBuys`). It happens only with old or restored data. |
+| B15 | **7 Oct 2026: improved** for the US stocks (Nasdaq history as a checked second source); the ETFs still depend on Yahoo. **Live prices** depend on Yahoo only (H5): Stooq blocks automated requests, and a second live source would need a key. |
 
 ### C. Things that may break (risks to watch)
 
 | ID | Risk | What to do if it happens |
 |---|---|---|
-| R1 | **File size growth.** The news history grows by about 20 stories a day, up to roughly 2–3 MB at 400 days. It is embedded in `bluechip-board.html` and in **each** Archive copy (about 2.5 MB each today). The script keeps 30 copies, so the Archive, trimmed to 3 on 6 Oct, will grow back to 30. The data file is 2.2 MB and the site 2.5 MB. | Lower `$HistoricoDias`, store fewer fields, or keep the history out of the Archive copies. The 30-copy limit is `Select-Object -Skip 30` in the write step. |
+| R1 | **7 Oct 2026: limits added:** news history at most 15,000 stories, Archive at most ~300 MB (and 30 copies). **File size growth.** The news history grows by about 20 stories a day, up to roughly 2–3 MB at 400 days. It is embedded in `bluechip-board.html` and in **each** Archive copy (about 2.5 MB each today). The script keeps 30 copies, so the Archive, trimmed to 3 on 6 Oct, will grow back to 30. The data file is 2.2 MB and the site 2.5 MB. | Lower `$HistoricoDias`, store fewer fields, or keep the history out of the Archive copies. The 30-copy limit is `Select-Object -Skip 30` in the write step. |
 | R2 | **ConvertFrom-Json on Windows PowerShell 5.1.** SEC `companyfacts` is 3.2–4.1 MB and parsed fine (about 1.1 s). If it grows a lot, 5.1 could hit its JSON size limit. | Switch to `companyconcept`, one request per tag (the option task 13 allowed). |
 | R3 | **PowerShell 7 turns ISO date-time text into `DateTime`** when reading JSON. Everything reread from `bluechip-board-data.json` or `noticias-historico.json` goes through `ConvertTo-IsoUtc`, but date-only text (`yyyy-MM-dd`) stays text. | Any new date field reread from the data must be normalised the same way. |
 | R4 | **External formats.** Each has validation and a fallback, but any of them can change: the SEC (submissions JSON, `companyfacts`, the `browse-edgar` 8-K Atom), the ECB Data Portal (series keys, CSV columns), iShares (holdings file layout), Yahoo, Nasdaq, Google News and FRED (already blocked). | Check *Sources & method* after a run; each source shows its error; the README lists every source. |
 | R5 | **The site tests use the day's `bluechip-board-data.json`.** Most scenarios fix their own data, but a few read real prices (e.g. 9 rows in the prices table, today's EUR/USD). A real-world change (a source down at the last run) can make such a check fail without a code bug. | Rerun the script, then the tests; if needed, have the scenario fix its own data, as `taxBaseline` does. |
 | R6 | **Duplicated rules** (B11): the alert thresholds and the rate-decision regex exist in two places. | Change both together. |
-| R7 | **`acceptanceDateTime` (B7):** if the SEC fixes it, nothing breaks (the Atom feed is still used). If the Atom endpoint is retired (audit F8), earnings sessions become Unavailable. | Move to another SEC source of acceptance times, such as the filing index pages. |
+| R7 | **7 Oct 2026: mitigated:** without the Atom feed the times come from the filing headers (at most 12 a run, cached by accession). **`acceptanceDateTime` (B7):** if the SEC fixes it, nothing breaks (the Atom feed is still used). If the Atom endpoint is retired (audit F8), earnings sessions become Unavailable. | Move to another SEC source of acceptance times, such as the filing index pages. |
 | R8 | **Headless Chrome / Edge** is needed by `Test-Site.ps1`. A site run takes about 4 min per shell, so a CI run takes about 15 min (Windows minutes count double on private repositories). | Run only the engine suite on pushes if the Actions minutes run short. |
 | R9 | **The sample data for the tests** (`Tests\fixtures\bluechip-board-data.sample.json`, from 6 Oct 2026) is used in a fresh clone and in CI. As it ages, checks that compare with today's date could start to fail there but not on this PC, which has a fresh data file. | Refresh the sample from a recent `bluechip-board-data.json` (it holds public data only; check it has no `"backup"` key and no e-mail). |
 
@@ -85,7 +85,7 @@ The single list of what is left after the audit (4 Oct) and the feature work of 
 
 | When | Item |
 |---|---|
-| Every few months | `$PesosReferencia` and each `Referencia` in `$ETFs` (reminder after 4 months); `$Script:UA` (Chrome 141). |
+| Every few months | `$PesosReferencia` and each `Referencia` in `$ETFs` (reminder after 4 months); `$Script:UAChrome` / `$Script:UAData` (Chrome 154 on 7 Oct 2026; reminder after about 8 releases). |
 | When a fund's top 10 changes | Add the holding to `$AliasesPosicoes`, with a known false positive in `Test-Engine.ps1` (reminder `Get-PosicoesSemAlias`). |
 | By **Oct 2027** | Add the 2028 Fed and ECB decisions to `$Calendario`, from the official pages (reminder `Get-LembreteReunioes`, 60 days ahead). Also the companies' earnings dates as they are confirmed. |
 | By **Jan 2028** | The exchange exception lists in `$Bolsas` end in 2027 (reminder at the start of the year). |
@@ -910,3 +910,98 @@ A new section in **Portfolio**, below *Your return*: **Target allocation · next
   - No new alerts.
 - **Final real run** (PowerShell 7, SEC e-mail, `-NoOpen`): 63 s, 79/79 sources, no reminders, backup unchanged, e-mail in no output.
 - **Tests:** engine 212 (+15), site 416 (+5), resilience 56 (+2). All green on PowerShell 7 and 5.1.
+
+---
+
+## Post-remediation follow-up · 7 Oct 2026
+
+A second, deep pass over the whole project: every finding above re-checked against the code and the tests (the FIXED ones too), the partially fixed ones investigated again, then an independent audit as if this file did not exist. Work on the branch `remediation/deep-audit-2026-10`, in small commits; every bug followed *reproduce → fix → regression test → full suites → real run*. Nothing was removed from the site, and no test was loosened (three checks whose expected text or request count changed with a deliberate change were updated, and say why).
+
+**Baseline before any change** (`main` at `933ee2d`): engine 212, site 416, resilience 56, all green on PowerShell 5.1 and 7; a real run took 59 s (PowerShell 7, 79/79 sources).
+
+### Bugs fixed in this pass
+
+| ID | Problem | Root cause | Fix | Test |
+|---|---|---|---|---|
+| N1 | On a Windows set to a non-Gregorian calendar (Thai), every price, dividend and Bitcoin date became `2569-…` | `.ToString('yyyy-MM-dd')` uses the current culture | Every date is formatted with the invariant culture | engine: Thai culture; a static check over the whole script |
+| N2 | A missing CoinGecko 24 h change showed as "+0.0% over the last 24 hours"; a missing dominance as 0 % | `[double]$null` is 0 in PowerShell, and `isFinite(null)` is true in JavaScript | Missing fields stay `null` in the data; the page tests for `null` | engine; site `btcnull` (fails on the old code) |
+| N3 | A `[date, null]` point became a price of 0 (a −100 % move) | `+null` is 0 in `toPts` | Missing values are left out | site `btcnull` |
+| N4 | At night the page showed the previous session's prices, flagged as a session behind (seen at 01:17 on 7 Oct: every series ended on 5 Oct) | Yahoo had not yet published the daily bar of 6 Oct, though the same answer had its close in `regularMarketPrice` | When the session has ended, that close is added as the day's point (within 50 % of the previous one), and the source row says so | engine (3 checks); real run: every series on 6 Oct |
+| N5 | Kraken and Stooq fallbacks accepted zero, negative or non-numeric closes; an isolated wrong tick was kept | No validation in the fallbacks | The same checks as Yahoo; an isolated point over 50 % away from two agreeing neighbours is dropped and counted; a huge last jump is flagged | engine (5 checks) |
+| N6 | Cents rounded on the binary value: €10.005 entered was exported as €10.00 | `Math.round(v*100)/100` on float noise | Rounding on the decimal value (15 digits), half away from zero; the `taxBaseline` files are still identical byte by byte | site `taxround` |
+| N7 | A backup with `true`, `null`, `''` or `[5]` as a quantity or price was read as 1, 0, 0 or 5; a Bitcoin purchase with a missing cost became a cost of €0 | `num = v => +v` | Only numbers and numeric text are accepted | site `bkstrict` |
+| N8 | Two identical purchases without ids in a version-1 backup became one (data loss) | The derived id was the same for both | A `#2`, `#3`… suffix; merging the same file again adds nothing | site `v1dup` |
+| N9 | Stale prices: "rose 5 % in the last session. Look for the cause in today's news" for a move days old; the portfolio's latest daily move added it as today's | The move used the last point without checking its date | The alert gives the date of the move; the daily move leaves out (and names) assets whose price is not current, and shows "—" when none is current | site `stalemove`, `staleall` |
+| N10 | An earnings reaction counted an intraday price as the close of the reaction session | The long history's last point can be intraday | That point is left out while the session is open | site `earnpartial` |
+| N11 | A release on a day the exchange is closed was "during the session"; a date before the price history mapped to its first session (years later) | No check of the day; the binary search had no lower bound | `quando = closed`, reaction at the next session; dates before the history use weekdays | engine (3 checks) |
+| B14 | A new sale was refused when any old sale, of any asset, lacked purchases | `C.vendas.find(x => x.falta > 0)` | Only the new sale, or a sale it breaks, is refused | site `sellother` (fails on the old code) |
+| N12 | Duplicate grouping could differ between two runs on the same news, and between PowerShell 5.1 and 7 | Ties in score and date kept the order of a hashtable (random per process on 7) | Ties broken by the title key | engine (input order reversed) |
+| N13 | `idb()` could hang forever if IndexedDB threw | The exception was raised inside an event handler | The promise is rejected | site `bkfolder` |
+| N14 | A permanent HTTP answer (404, 403…) was retried after 2 s | Every error was retried | No second try for 400/401/403/404/410 | engine |
+| N15 | Asset names in the colour tags were not escaped; ETF ids from the data were not checked | Defence in depth (the values come from the script's configuration) | `esc()` in `coTag`; ETF ids must be simple | site (existing `xss`, `etfbad`) |
+
+### Findings re-evaluated
+
+| ID | Before | Now | Detail |
+|---|---|---|---|
+| H4a | PARTIALLY FIXED | **IMPROVED** | The browser rule stays (a reopened page needs a user gesture before it can write the file again). Now the first change on the page asks for the permission once, and saving resumes; if the browser kept the permission ("Allow on every visit" in newer Chrome), saving resumes on opening; leaving the page with changes made there and not in the file asks first. Scenarios `bkperm`, `bkpermno`. |
+| H4g | PARTIALLY FIXED | **FIXED** (for new links) | *Save to project folder* asks for the folder and refuses one without `bluechip-board.html` at once. The next-run check stays as a second line of defence (and covers a file linked before this change). Scenario `bkfolder`. |
+| H5 | PARTIALLY FIXED | **IMPROVED** | US stocks: Nasdaq's daily history (no key, the service already used for earnings dates) as a fallback, accepted only when at least 20 dates match the previous run's prices (median within 1 %, each within 3 %): another split basis or symbol is refused; without a previous run it is not used. Plus N4 and N5. The ETFs still have only Yahoo (no keyless Xetra source was found); Stooq still blocks. |
+| L9 | PARTIALLY FIXED | **IMPROVED** | A full single source of truth would mean restructuring the template, out of proportion. Instead an engine check fails when an asset is missing from any place a new asset must be added (CO, ANEXO_J, keywords, feed, BOLSA_DE, PF, SEC, Fundamentals, colour token). |
+| F2 | PARTIALLY FIXED | **IMPROVED** | `$Script:UAChrome = 154` (the Chrome installed here; it was 141, a year old) and `$Script:UAData`, with a reminder after about 8 releases. All 79 sources answered with the new identity. |
+| F5 | PARTIALLY FIXED | IMPROVED | The browser-identity reminder joins the others. Reference weights and the calendar are still data you maintain. |
+| F7 | PARTIALLY FIXED | IMPROVED | iShares source rows name a missing column, a missing ISIN and each Unavailable breakdown. |
+| F8 | NOT FIXED | **FIXED** | The official EDGAR filing header (`…-index-headers.html`, `ACCEPTANCE-DATETIME` in New York time) gives the acceptance time of any filing, no longer only the Atom feed's 40 latest. Checked on 7 Oct against the submissions JSON for NVIDIA (where that field is right), in summer and winter time: identical. At most 12 a run per company, then cached. Migrating the whole source to the JSON API was not needed. |
+| F9, F10, F11 | PARTIALLY FIXED | Unchanged / improved | Nasdaq dates keep their plausibility window; feeds benefit from N14; Chrome's folder rules from H4a and H4g. |
+| F12 | NOT FIXED (legal) | Unchanged | No tax rule was changed or added. |
+| F13 | PARTIALLY FIXED | Unchanged | Deutsche Börse confirms the year-end session by circular; there is no keyless calendar to read it from. The rule plus `curtos` stays. |
+| F14 | NOT FIXED | **FIXED** | Profiling showed that on PowerShell 7.6 every .NET method call costs about 10 µs (AMSI method-invocation logging; about 1 µs on 5.1). Classification and grouping now use hashtables read by index, arrays and operators: identical results on the real data (4,870 titles, 1,334 groups, 24,350 classifications, both shells); grouping 6.9 → 2.3 s, classification about 3× faster. |
+| S2 | NOT FIXED | **Kept, with the reasons** | Prefixing the keys per installation would not stop another local page from reading them (same `file://` origin), would break the Archive pages and need a migration of the existing data: risk without a security gain. |
+| S3 | NOT FIXED | **FIXED** | The script reads the e-mail itself from `BLUECHIP_SEC_EMAIL` or `bluechip-board.config.json`; the scheduled task never stores it in its arguments (a warning says where it must be), and the launcher no longer passes it on the command line. By design it still goes only in the SEC User-Agent. |
+| B7 | Limitation | **FIXED** | See F8: 54 of 54 earnings 8-K have their time on the real data (7 were Unavailable). |
+| R1 | Risk | Mitigated | News history at most 15,000 stories (its start moves with it); Archive at most ~300 MB on top of 30 copies (the 5 newest always kept). |
+| R2 | Risk | Unchanged | `companyfacts` (3–4 MB) parses fine on 5.1; a size guard is not needed today. |
+
+### Decisions (D1–D9): technical assessment
+
+| ID | Verdict | Why |
+|---|---|---|
+| D1 Quadro 8A E11/E10 | **KEEP** | A fact of your case (who withheld tax), not a software choice; configurable in `ANEXO_J.q8a`. |
+| D2 G20 / G01, País da fonte | **KEEP** | A legal interpretation; the export labels it and leaves the decision visible. |
+| D3 FRED | **DEFER** | FRED still blocks (7 Oct). The Chicago Fed's own NFCI CSV answers without a key: a clean option for one of the three series, waiting for your decision to add an indicator. The yield curve could be approximated from Yahoo `^TNX` − `^IRX` (labelled as an approximation); the HY spread has no keyless public source. |
+| D4 CAPE | **DEFER** | Still no current, keyless CSV. |
+| D5 200-day alert | **KEEP** | A preference about alert noise; nothing is wrong. |
+| D6 ECB importance | **KEEP** | A preference (it would add an Overview alert). |
+| D7 alias precedence | **KEEP** | It would change existing classifications; needs your decision and a deliberate test update. |
+| D8 Alphabet gross margin | **DEFER** | Revenue − `CostOfRevenue` is a sound derivation, but Alphabet itself reports no gross profit, so showing one is an analytical choice. Kept Unavailable until you want it (it would be marked derived). |
+| D9 SXR8/EUNN country | **KEEP** | Your choice of 6 Oct; flagged as approximate in the page. |
+
+### Still limited by outside services or rules
+
+- **Yahoo** remains the only price source for the four Xetra ETFs and for EUR/USD's 1-year series (with the long history and the ECB as fallbacks); its chart API is unofficial.
+- **Browsers:** a reopened `file://` page needs a user gesture before it can write the backup file again; `file://` pages share `localStorage`.
+- **SEC:** the submissions JSON's `acceptanceDateTime` is still wrong for Apple (the times come from the Atom feed and the filing headers); the `recent` list reaches only ~3 years back for Alphabet (B8).
+- **iShares, Nasdaq, news feeds, ECB:** each validated, with its own fallback and error row, but outside the project.
+- **Tax rules:** the Anexo J files are preparation files; the interpretations (D1, D2, the 365-day reading) are yours or your accountant's to confirm each year.
+
+### New risks found
+
+| ID | Risk | What to do |
+|---|---|---|
+| R10 | PowerShell 7's per-call cost of .NET methods can come back in any new loop over thousands of items | Follow the note in README → *Making a change safely* (hashtables by index, arrays, operators). |
+| R11 | The close taken from the quote (N4) relies on Yahoo's `regularMarketPrice` being the official close once the session has ended | It is checked against the previous close (within 50 %) and named in the source row; the next run replaces it with the daily bar. |
+| R12 | The Nasdaq fallback needs a previous run to compare with | On a fresh install with Yahoo down there is still no price for the US stocks (Unavailable, never guessed). |
+
+### Results
+
+| Check | Before | After |
+|---|---|---|
+| Engine, PowerShell 5.1 / 7 | 212 / 212 | **251 / 251** |
+| Site (headless Chrome), run from 5.1 / 7 | 416 / 416 | **436 / 436** |
+| Resilience, PowerShell 5.1 / 7 | 56 / 56 | **62 / 62** |
+| Real run (PowerShell 7, `-NoOpen`, SEC e-mail from the config) | 59 s, 79/79 sources | 53–59 s, 79/79 sources (the first run also fetched 7 filing headers); the same 1,340 stories and 163 duplicates as the old code on the same news |
+| Site in headless Chrome at 1,280–5,120 px | — | no JavaScript error, no horizontal overflow in any tab, every chart drawn; page load ~0.84 s at 3,840 px |
+| Portfolio | — | `bluechip-board-backup.json` unchanged (SHA-256 `944F4C24…`) through every run; the copy embedded in the site identical, field by field (buys, lots, sales, deleted, targets, policy, notes, fees) |
+| Privacy | — | the SEC e-mail is in no output, log or commit; no personal file is tracked by git |
+
+New regression tests: engine +39, site +20 (12 scenarios), resilience +6.
